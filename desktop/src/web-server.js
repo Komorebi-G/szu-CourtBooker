@@ -17,6 +17,7 @@ import { JobStore, JOB_ACTIVE } from './jobs.js';
 import { NativeScheduler } from './native-scheduler.js';
 import { loadSession } from './session.js';
 import { AccountStore } from './accounts.js';
+import { managerIdentity, startManagerServer } from './manager-server.js';
 import { addDays, resolveDate, shanghaiDate, splitTimeSlot } from '../../shared/utils.js';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -42,6 +43,12 @@ const scheduler = new NativeScheduler({ root, worker });
 const jobs = new JobStore({ root, worker, sessionPath, scheduler, dataDir: resolve(process.env.SZU_DATA || join(root, '.data')) });
 const accounts = new AccountStore({ dataDir: jobs.dataDir, legacySessionPath: sessionPath });
 let authChild = null;
+// Fail at startup with a useful diagnostic rather than serving a blank 404 page.
+for (const name of ['index.html', 'app.js', 'styles.css']) {
+  const content = await readFile(join(webRoot, name));
+  if (!content.length) throw new Error(`界面资源为空：${name}，请重新安装当前版本`);
+}
+const identity = await managerIdentity(root, [configPath, sessionPath, jobs.dataDir], process.env.SZU_BUILD_ID);
 
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -309,6 +316,7 @@ function findTask(config, id) {
 }
 async function handleApi(request, response, url) {
   const method = request.method ?? 'GET';
+  if (method === 'GET' && url.pathname === '/api/health') return json(response, 200, { ...identity, ready: true });
   if (method === 'GET' && url.pathname === '/api/bootstrap') {
     return json(response, 200, { ok: true, app: 'szu-court-booker', config: publicConfig(await loadConfig(configPath)),
       session: await sessionSummary(), accounts: await accounts.list(), auth: authState, jobs: await jobs.list(),
@@ -490,21 +498,15 @@ function openBrowser(url) {
   child.unref();
 }
 
-server.on('error', async (error) => {
-  if (error.code === 'EADDRINUSE') {
-    try {
-      const response = await fetch('http://127.0.0.1:' + port + '/api/bootstrap');
-      const existing = await response.json();
-      if (existing.app === 'szu-court-booker') { if (shouldOpen) openBrowser('http://127.0.0.1:' + port); return; }
-    } catch {}
+try {
+  const { url, reused } = await startManagerServer(server, { port, host, identity });
+  console.log(`场馆预约助手${reused ? '已在运行' : '已启动'}：${url}`);
+  if (!reused) {
+    console.log('Cookie 和配置只保存在本机。按 Ctrl+C 停止。');
+    void jobs.resumeDue().catch((error) => console.error('恢复预约执行器失败：' + error.message));
   }
-  console.error(error.message);
-  process.exitCode = 1;
-});
-server.listen(port, host, () => {
-  const url = `http://127.0.0.1:${server.address().port}`;
-  console.log(`场馆预约助手已启动：${url}`);
-  console.log('Cookie 和配置只保存在本机。按 Ctrl+C 停止。');
-  void jobs.resumeDue().catch((error) => console.error('恢复预约执行器失败：' + error.message));
   if (shouldOpen) openBrowser(url);
-});
+} catch (error) {
+  console.error(error.message);
+  throw error; // SEA bootstrap records the failure in startup.log for GUI executables.
+}

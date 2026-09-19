@@ -28,9 +28,11 @@ node src/web-server.js
 node src/web-server.js --no-open
 ```
 
-访问 <http://127.0.0.1:4173>。Windows 源码启动入口也支持项目内 `runtime/node.exe`。
+默认使用 <http://127.0.0.1:4173>。端口被旧版、其他程序或不同数据目录的实例占用，或被系统拒绝绑定时，会自动换用可用端口并打开正确地址；请以新启动程序打开的页面为准，不要一直刷新旧书签。Windows 源码启动入口也支持项目内 `runtime/node.exe`。
 
 普通 Windows/Linux 默认监听回环地址；WSL 为兼容 Windows localhost 转发监听 `0.0.0.0`。本版没有远程访问认证，不应暴露到公网。界面支持手机宽度，但手机远程管理、HTTPS 和身份验证属于后续扩展。
+
+同版本、同数据目录且页面资源正常的管理实例才会复用，因此不同位置的同版 EXE 不会重复启动管理服务。旧版实例不会被强制关闭，已安排的预约不受端口切换影响。EXE 启动会校验自己的解压缓存，缺失、损坏或未完成解压的程序文件会自动修复；不会清空账号、配置和执行记录。
 
 ## 使用
 
@@ -134,3 +136,5 @@ node src/cli.js run --now
 ```
 
 最后一条只做配置检查。正式自动执行统一通过网页安排，以确保多个任务共用后台执行器。
+
+管理实例专项检查：`node --test test/manager-server.test.js test/sea-cache.test.js`。Windows 新旧 EXE 联调脚本为 `scripts/verify-manager-instances.js`，需要 `.build/SZU-CourtBooker-before-manager-fix.exe` 旧测试包；使用临时隔离数据目录、禁止自动打开浏览器，不调用学校接口；验收脚本需本机 Windows Node 读取 Windows 回环地址，EXE 本身仍不依赖外部 Node。

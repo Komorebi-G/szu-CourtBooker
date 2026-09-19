@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,"><link rel="stylesheet" href="/styles.css">
+  <title>场馆预约助手</title>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/" aria-label="场馆预约助手首页"><span class="brand-mark">场</span><strong>场馆预约助手</strong></a><button id="sessionButton" class="secondary">登录状态</button></header>
+  <main class="page">
+    <div class="page-heading"><div><p class="eyebrow">SZU · 粤海校区</p><h1>预约计划</h1><p class="muted">选好日期、时段和场地。明天的场，今天 12:30 开抢。</p></div><button id="addTaskButton" class="primary">＋ 新建任务</button></div>
+    <div id="connectionError" class="notice error" role="alert" hidden></div>
+    <section class="schedule-note"><span class="status-dot"></span><div><strong>安排成功后，关闭网页也会执行</strong><p id="schedulerHint">正在读取系统调度状态……</p></div><span class="count" id="planCount"></span></section>
+    <div class="list-heading"><h2>我的任务</h2><span class="muted">每个时段争取一个场地 · 成功后保留预约</span></div>
+    <div id="taskList" class="task-list"><div class="empty">正在读取任务……</div></div>
+    <details class="help"><summary>运行、休眠和清理说明</summary><p>任务会提前两分钟准备，到设定时间才提交。开始时间后30分钟内允许补跑或恢复，持续时间从本次实际开始重新计算；已成功时段不再提交。超过30分钟不补跑。中断时结果未知的请求会先核对学校记录，无法确认的时段跳过并提示。</p><p>Windows 会请求休眠唤醒，并在重新登录后恢复符合条件的任务。请保持用户登录、允许唤醒定时器并联网，关机时不能执行。旧版已登记任务需在新版停止后重新安排，才有登录恢复触发。Linux 用户定时器需要保持登录和唤醒。</p><p>“停止并取消定时”会停止后续尝试，等待已发出请求的结果，手动停止不会自动恢复。“删除”移除系统定时项，把日志移入回收目录。它们都不会取消学校已经成功的预约。</p></details>
+  </main>
+
+  <dialog id="taskDialog" aria-labelledby="taskDialogTitle">
+    <form id="taskForm">
+      <div class="dialog-head"><div><p class="eyebrow">安排一次预约</p><h2 id="taskDialogTitle">新建任务</h2></div><button type="button" class="icon-button" data-close="task" aria-label="关闭任务编辑">×</button></div>
+      <div class="dialog-body">
+        <div class="form-grid"><label class="wide">预约用户<select id="taskAccount"></select></label><label>项目<select id="taskProject"></select></label><label>预约日期<select id="taskDate"></select></label><label class="wide">任务名称 <span class="optional">可不填</span><input id="taskName" maxlength="40" placeholder="例如：周日晚间排球"></label></div>
+        <div class="schedule-preview" id="schedulePreview"></div>
+        <div class="form-grid"><label class="wide">开始尝试的时间 <span class="optional">北京时间</span><input type="datetime-local" id="taskStart" step="1" required></label><label>重试间隔（秒）<input type="number" id="taskInterval" value="0.1" min="0.1" max="3600" step="0.1" required></label><label>持续尝试（分钟）<input type="number" id="taskDuration" value="1" min="0.1" max="1440" step="0.1" required></label></div><p class="field-help">同一账号、同一项目、同一天成功两个时段后停止，其余已选时段作为候选。捡漏可设置较长间隔和持续时间，所有任务共用一个后台执行器。</p>
+        <fieldset><legend>预约时段</legend><p class="field-help">每个选中的时段都要预约。能否再次预约以学校系统结果为准。</p><div id="timeOptions" class="time-options"></div><p class="field-help" id="timeNote"></p><details><summary>手动添加时段</summary><div class="manual-time"><input type="time" id="manualStart" aria-label="时段开始时间"><span>至</span><input type="time" id="manualEnd" aria-label="时段结束时间"><button type="button" id="addTimeButton" class="secondary">添加</button></div></details></fieldset>
+        <fieldset><legend>场地优先顺序</legend><p class="field-help">按喜欢的顺序点击，数字就是尝试顺序。再次点击可取消。</p><div id="courtSequence" class="court-sequence"></div><div class="field-actions"><button type="button" id="allCourts" class="secondary">尝试全部场地</button><button type="button" id="clearCourts" class="text-button">清空选择</button></div><div id="courtList" class="court-list"></div></fieldset>
+        <label class="check-label"><input id="preferSameCourt" type="checkbox"><span><strong>优先同一场地</strong><small>后一时段先尝试前一时段约到的场地，再按上方顺序继续。允许换场，不退订。</small></span></label>
+        <p id="taskError" class="form-error" role="alert"></p>
+      </div>
+      <div class="dialog-actions"><button type="button" class="secondary" data-close="task">取消</button><button type="submit" class="secondary" name="intent" value="draft">保存草稿</button><button type="submit" class="primary" id="saveTaskButton" name="intent" value="schedule">保存并安排</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="confirmDialog" class="small-dialog" aria-labelledby="confirmTitle"><div class="dialog-head"><h2 id="confirmTitle">确认预约安排</h2><button class="icon-button" data-close="confirm" aria-label="关闭确认">×</button></div><div class="dialog-body"><p id="confirmSummary"></p><p class="muted">这会向学校提交真实预约。成功后保留，付款请在学校系统完成。</p><p id="confirmError" class="form-error" role="alert"></p></div><div class="dialog-actions"><button class="secondary" data-close="confirm">返回</button><button class="primary" id="confirmRunButton">确认安排</button></div></dialog>
+
+  <dialog id="logDialog" aria-labelledby="logTitle"><div class="dialog-head"><div><p class="eyebrow">本地执行记录</p><h2 id="logTitle">任务日志</h2></div><button class="icon-button" data-close="log" aria-label="关闭日志">×</button></div><div class="dialog-body"><select id="logHistory" aria-label="选择执行记录"></select><div id="logResult" class="result-list"></div><div id="logBox" class="log-box"></div></div><div class="dialog-actions"><button id="stopLogButton" class="danger" hidden>停止并取消定时</button><button id="deleteLogButton" class="secondary">删除这次记录</button><button class="secondary" data-close="log">关闭</button></div></dialog>
+
+  <dialog id="authDialog" class="small-dialog" aria-labelledby="authTitle">
+    <div class="dialog-head"><h2 id="authTitle">账号管理</h2><button class="icon-button" data-close="auth" aria-label="关闭登录">×</button></div>
+    <div class="dialog-body">
+      <label>当前管理的用户<select id="authAccount"></select></label><p id="accountSummary" class="field-help"></p>
+      <details><summary>新增用户</summary><div class="new-account-row"><input id="accountName" placeholder="备注，例如：舍友小王" maxlength="40" aria-label="用户备注"><button id="addAccountButton" class="secondary">添加用户</button></div></details>
+      <p class="field-help">可以在本机登录，也可以导入舍友分享的登录文件。导入后点击验证，检查学校账号是否正确。</p>
+      <button id="startAuthButton" class="primary full">打开浏览器登录此用户</button>
+      <details class="auth-import" open><summary>导入 JSON / cURL / Cookie</summary>
+        <label class="file-label">选择登录文件<input id="loginFile" type="file" accept=".json,.txt"></label>
+        <textarea id="curlInput" rows="4" aria-label="登录 JSON、cURL 或 Cookie" placeholder="粘贴登录 JSON、浏览器 Copy as cURL 或 Cookie 内容"></textarea>
+        <button id="importCurlButton" class="secondary">导入到此用户</button>
+      </details>
+      <div class="account-export"><button id="exportAccountButton" class="secondary">导出登录文件</button><button id="copyAccountButton" class="text-button">复制登录 JSON</button><button id="showAccountButton" class="text-button">查看完整 JSON</button></div>
+      <textarea id="loginJsonExport" rows="6" readonly hidden aria-label="完整登录 JSON"></textarea>
+      <p class="field-help">支持完整查看和复制。舍友也可以直接发送 cURL 或 Cookie 字符串给你导入。</p>
+      <p id="authProgress" class="auth-progress" role="status"></p>
+    </div>
+    <div class="dialog-actions"><button class="text-button danger-text" id="deleteSessionButton">清除此用户登录</button><button class="secondary" id="verifySessionButton">验证此用户</button></div>
+  </dialog>
+  <footer class="app-footer"><button id="quitAppButton" class="text-button">退出管理服务</button><span>已安排的后台预约不受影响；重新打开程序即可管理。</span></footer>
+  <div id="toast" class="toast" role="status"></div>
+  <script type="module" src="/app.js"></script>
+</body></html>

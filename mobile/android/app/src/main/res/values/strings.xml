@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">场馆预约助手</string>
+    <string name="title_activity_main">场馆预约助手</string>
+    <string name="package_name">cn.szucourt.booker</string>
+    <string name="custom_url_scheme">cn.szucourt.booker</string>
+</resources>

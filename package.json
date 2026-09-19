@@ -1,0 +1,33 @@
+{
+  "name": "szu-court-booker",
+  "version": "0.2.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "description": "深圳大学体育场馆预约助手",
+  "scripts": {
+    "web": "node src/web-server.js",
+    "start": "node src/cli.js",
+    "auth": "node scripts/auth.js",
+    "auth:paste": "node scripts/import-curl.js",
+    "login": "node scripts/open-login.js",
+    "session:import": "node src/cli.js session import-edge",
+    "session:check": "node src/cli.js session check",
+    "catalog": "node src/cli.js catalog",
+    "run:dry": "node src/cli.js run --now",
+    "check": "node --test",
+    "build:windows": "node scripts/build-windows.js",
+    "build:android": "npm run apk --prefix mobile",
+    "release:prepare": "node scripts/prepare-release.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "playwright-core": "^1.55.0",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "postject": "^1.0.0-alpha.6"
+  }
+}

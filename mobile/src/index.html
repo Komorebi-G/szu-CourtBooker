@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light"><title>场馆预约助手 · 手机</title>
+<link rel="stylesheet" href="base.css"><link rel="stylesheet" href="styles.css"></head>
+<body>
+<header class="mobile-head"><span class="brand-mark">场</span><div><b>场馆预约助手</b><p>手机前台版</p></div><span id="runtime" class="project-tag">加载中</span></header>
+<main>
+<div id="fatal" class="notice error" role="alert" hidden></div>
+<section id="plansPage">
+  <div class="section-head"><div><p class="eyebrow">准备下一场运动</p><h1>预约方案</h1></div><button id="newPlan" class="primary">＋ 新建</button></div>
+  <p class="explain">保存方案不会预约。执行时保持 App 打开，离开前台会中断。</p>
+  <div id="plans" class="task-list"></div>
+  <div id="batchBar" class="batch-bar"><span id="selectedCount">未选择方案</span><button id="begin" class="primary">执行所选</button></div>
+</section>
+<section id="resultsPage" hidden>
+  <div class="section-head"><div><p class="eyebrow">进度与本地记录</p><h1>执行结果</h1></div><button id="stop" class="danger" hidden>停止执行</button></div>
+  <div id="liveStatus" class="schedule-note" hidden></div><div id="runs" class="task-list"></div>
+</section>
+<section id="accountsPage" hidden>
+  <div class="section-head"><div><p class="eyebrow">每个方案独立选择</p><h1>账号</h1></div><button id="schoolLogin" class="primary">＋ 学校登录</button></div>
+  <p class="explain">直接在 App 内登录学校，自动获取并验证登录状态。也可导入舍友发送的 JSON / Cookie。</p>
+  <div class="field-actions"><button id="newAccount" class="secondary">导入 JSON / Cookie</button></div>
+  <div id="accounts" class="task-list"></div>
+</section>
+</main>
+<nav class="bottom-tabs" aria-label="主导航"><button data-tab="plans" aria-current="page">方案</button><button data-tab="results">结果</button><button data-tab="accounts">账号</button></nav>
+
+<dialog id="planDialog"><form id="planForm">
+  <div class="dialog-head"><h2 id="planTitle">新建方案</h2><button type="button" class="icon-button" data-close="plan" aria-label="关闭方案">×</button></div>
+  <div class="dialog-body">
+    <div class="form-grid">
+      <label class="wide">名称<input id="planName" maxlength="60" required placeholder="例如：明天下午羽毛球"></label>
+      <label class="wide">执行账号<select id="planAccount" required></select></label>
+      <label>项目<select id="planProject"></select></label><label>预约日期<select id="planDate"></select></label>
+    </div>
+    <div class="field-actions"><button id="loadCatalog" type="button" class="secondary">读取学校时段与场地</button></div>
+    <p id="catalogNote" class="field-help">读取目录后，按喜好顺序点击场地。</p>
+    <fieldset><legend>预约时段</legend><div id="times" class="time-options"></div>
+      <details><summary>手动添加时段</summary><div class="manual-time"><input id="timeStart" type="time" aria-label="时段开始"><span>至</span><input id="timeEnd" type="time" aria-label="时段结束"><button id="addTime" type="button" class="secondary">添加</button></div></details>
+    </fieldset>
+    <fieldset><legend>场地优先顺序</legend><p class="field-help">数字就是尝试顺序。再次点击取消。</p><div id="sequence" class="court-sequence"></div>
+      <div class="field-actions"><button id="allCourts" type="button" class="secondary">按学校顺序全部尝试</button><button id="clearCourts" type="button" class="text-button">清空选择</button></div>
+      <div id="courts" class="court-list"></div>
+    </fieldset>
+    <label class="check-label"><input id="sameCourt" type="checkbox"><span>优先同一场地<small>相邻后一时段优先尝试前一时段约到的场地。允许换场，不退订。</small></span></label>
+    <p class="hint">同一账号、同一项目、同一天成功两个时段后停止，其余已选时段作为候选。</p>
+    <details class="advanced"><summary>重试设置</summary><div class="form-grid"><label>间隔（秒）<input id="interval" type="number" min="0.1" max="3600" step="0.1" value="0.1" required></label><label>持续（分钟）<input id="duration" type="number" min="1" max="1440" step="1" value="2" required></label></div></details>
+    <p id="planError" class="form-error" role="alert"></p>
+  </div>
+  <div class="dialog-actions"><button type="button" class="secondary" data-close="plan">取消</button><button type="submit" class="primary">保存方案</button></div>
+</form></dialog>
+
+<dialog id="accountDialog"><form id="accountForm">
+  <div class="dialog-head"><h2 id="accountTitle">导入账号</h2><button type="button" class="icon-button" data-close="account" aria-label="关闭账号">×</button></div>
+  <div class="dialog-body"><label>账号备注<input id="accountName" maxlength="40" required placeholder="例如：我 / 舍友"></label>
+    <label class="file-label">选择登录 JSON 文件<input id="sessionFile" type="file" accept=".json,.txt,application/json,text/plain"></label>
+    <textarea id="sessionText" rows="8" required placeholder="粘贴完整登录 JSON、Cookie 或 cURL"></textarea>
+    <p id="accountError" class="form-error" role="alert"></p>
+  </div><div class="dialog-actions"><button type="button" class="secondary" data-close="account">取消</button><button type="submit" class="primary">保存登录</button></div>
+</form></dialog>
+
+<dialog id="loginDialog"><div class="dialog-head"><h2 id="loginTitle">学校账号登录</h2><button class="icon-button" data-close="login" aria-label="关闭学校登录">×</button></div>
+  <div class="dialog-body"><label>账号备注（可不填）<input id="loginName" maxlength="40" placeholder="默认使用学校姓名"></label>
+    <p id="loginHint" class="field-help">将打开学校登录页。每次清理登录窗口旧会话，不影响已保存的账号。完成登录后自动识别并验证，无需手动复制 Cookie。</p>
+    <p id="loginStatus" class="auth-progress" role="status"></p><p id="loginError" class="form-error" role="alert"></p>
+  </div><div class="dialog-actions"><button class="secondary" data-close="login">取消</button><button id="openSchoolLogin" class="primary">打开学校登录</button></div>
+</dialog>
+
+<dialog id="confirmDialog"><div class="dialog-head"><h2>开始本次执行</h2><button class="icon-button" data-close="confirm" aria-label="关闭确认">×</button></div>
+  <div class="dialog-body"><div id="confirmPlans"></div>
+    <label class="run-choice"><input type="radio" name="mode" value="release" checked><span>等待放号<small>预约日期前一天 12:30，到点才提交；等待时也须保持前台。</small></span></label>
+    <label class="run-choice"><input type="radio" name="mode" value="now"><span>立即尝试<small>现在开始真实预约，按设置间隔继续捡漏。</small></span></label>
+    <p class="muted">运行时自动保持亮屏。切后台、锁屏可能中断；已成功预约不会退订。支付请在学校完成。</p>
+    <p id="confirmError" class="form-error" role="alert"></p>
+  </div><div class="dialog-actions"><button class="secondary" data-close="confirm">返回</button><button id="confirmStart" class="primary">确认并开始</button></div>
+</dialog>
+
+<dialog id="textDialog"><div class="dialog-head"><h2 id="textTitle">登录 JSON</h2><button class="icon-button" data-close="text" aria-label="关闭文本">×</button></div><div class="dialog-body"><textarea id="exportText" rows="14" readonly></textarea></div><div class="dialog-actions"><button id="copyText" class="primary">复制完整内容</button></div></dialog>
+<div id="toast" class="toast" role="status"></div>
+<script type="module" src="app.js"></script>
+</body></html>

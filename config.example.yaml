@@ -1,0 +1,12 @@
+# Copy to config.yaml for CLI use. The desktop UI creates an empty config automatically.
+scheduler:
+  releaseTime: '12:30:00'
+  targetDate: tomorrow
+  pollIntervalMs: 100
+  pollJitterMs: 0
+  timeoutMs: 120000
+  queryConcurrency: 2
+  heartbeatMinutes: 5
+booking:
+  taskConcurrency: 4
+targets: []

@@ -70,7 +70,10 @@ export async function runBooking({ api, client, config, targets, date, immediate
       const unique = new Map(catalogs.flat().filter((task) => task.target === target)
         .map((task) => [task.room.WID, task.room]));
       const rooms = [...unique.values()];
-      const rank = (room) => target.courtNames?.findIndex((value) => value === room.WID || value === room.CDMC) ?? 0;
+      const rank = (room) => {
+        const index = target.courtNames?.findIndex((value) => value === room.WID || value === room.CDMC) ?? 0;
+        return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+      };
       rooms.sort((a, b) => rank(a) - rank(b));
       return [...target.times].sort().map((time, timeIndex) => ({ target, date, time, timeIndex, rooms,
         key: `${target.targetIndex}|${date}|${time}` }));

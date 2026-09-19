@@ -92,7 +92,7 @@ export function roomsToTasks(group, rooms) {
   const requested = group.target.courtNames;
   return rooms
     .filter((room) => room.CGBM === group.venue.CGBM)
-    .filter((room) => !requested || requested.includes(room.CDMC) || requested.includes(room.WID))
+    .filter((room) => !requested || group.target.includeOtherCourts === true || requested.includes(room.CDMC) || requested.includes(room.WID))
     .map((room, rowIndex) => {
       const configuredIndex = requested
         ? Math.min(...[room.CDMC, room.WID].map((name) => {

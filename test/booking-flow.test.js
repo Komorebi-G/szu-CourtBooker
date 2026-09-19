@@ -86,3 +86,26 @@ test('重复项目时段交给学校接口判断，执行器不按本地任务�
 test('默认前一天12:30，闰月与跨月日期正确', () => {
   assert.equal(bookingReleaseAt('2028-03-01'), Date.parse('2028-02-29T12:30:00+08:00'));
 });
+
+test('可选剩余场地：每轮先选定顺序，再学校顺序，重复目录不重复提交', async () => {
+  const { args, api, attempts } = fixture({ courtNames: ['B', 'A'], includeOtherCourts: true, times: ['19:00-20:00'], preferSameCourt: false });
+  api.getOpeningRooms = async () => ['D', 'A', 'B', 'C', 'D'].map((id) => ({ WID: id, CDMC: id, CGBM: 'v' }));
+  api.book = async ({ time, room }) => { attempts.push([time, room.WID]); return { code: attempts.length === 8 ? '0' : '1' }; };
+  const result = await runBooking(args);
+  assert.equal(result.ok, true);
+  assert.deepEqual(attempts.map((a) => a[1]), ['B', 'A', 'D', 'C', 'B', 'A', 'D', 'C']);
+});
+test('关闭剩余场地：未选的场地始终不尝试，兼容旧方案', async () => {
+  for (const includeOtherCourts of [undefined, false]) {
+    const { args, api, attempts } = fixture({ courtNames: ['B', 'A'], includeOtherCourts, times: ['19:00-20:00'] });
+    api.book = async ({ time, room }) => { attempts.push([time, room.WID]); return { code: attempts.length === 4 ? '0' : '1' }; };
+    assert.equal((await runBooking(args)).ok, true);
+    assert.deepEqual(attempts.map((a) => a[1]), ['B', 'A', 'B', 'A']);
+  }
+});
+test('剩余场地成功后，同场优先仍能用于相邻时段', async () => {
+  const { args, api, attempts } = fixture({ courtNames: ['B'], includeOtherCourts: true, times: ['19:00-20:00', '20:00-21:00'] });
+  api.book = async ({ time, room }) => { attempts.push([time, room.WID]); return { code: room.WID === 'C' ? '0' : '1' }; };
+  assert.equal((await runBooking(args)).ok, true);
+  assert.deepEqual(attempts.map((a) => a[1]), ['B', 'C', 'C']);
+});

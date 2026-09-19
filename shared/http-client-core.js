@@ -31,6 +31,8 @@ export class CoreHttpClient {
     this.save = save;
     this.timeoutMs = timeoutMs;
     this.dirty = false;
+    this.cookieRevision = 0;
+    this.flushPending = Promise.resolve();
   }
 
   cookieHeader(url) {
@@ -61,10 +63,11 @@ export class CoreHttpClient {
       if (index >= 0) this.session.cookies[index] = { ...this.session.cookies[index], ...incoming };
       else this.session.cookies.push(incoming);
       this.dirty = true;
+      this.cookieRevision++;
     }
   }
 
-  async request(path, { method = 'GET', form, expect = 'json', timeoutMs } = {}) {
+  async request(path, { method = 'GET', form, expect = 'json', timeoutMs, deadlineMs } = {}) {
     const url = new URL(path, BASE_URL);
     const headers = {
       accept: expect === 'json' ? '*/*' : 'text/html,application/xhtml+xml',
@@ -84,11 +87,15 @@ export class CoreHttpClient {
     }
 
     const startedAt = Date.now();
+    if (Number.isFinite(deadlineMs) && startedAt >= deadlineMs) {
+      const error = new Error('执行窗口已结束，未发送请求'); error.code = 'REQUEST_NOT_SENT'; throw error;
+    }
     const response = await this.transport(url, {
       method,
       headers,
       body,
       redirect: 'manual',
+      deadlineMs,
       signal: AbortSignal.timeout(timeoutMs ?? this.timeoutMs),
     });
     const endedAt = Date.now();
@@ -129,10 +136,16 @@ export class CoreHttpClient {
     return this.request(path, { ...options, method: 'POST', form });
   }
 
-  async flush() {
-    if (!this.dirty) return;
-    this.session.savedAt = new Date().toISOString();
-    await this.save(this.session);
-    this.dirty = false;
+  flush() {
+    // Serialize snapshots; a response arriving during a save must remain dirty.
+    const work = this.flushPending.catch(() => {}).then(async () => {
+      if (!this.dirty) return;
+      const revision = this.cookieRevision;
+      this.session.savedAt = new Date().toISOString();
+      await this.save(structuredClone(this.session));
+      if (revision === this.cookieRevision) this.dirty = false;
+    });
+    this.flushPending = work;
+    return work;
   }
 }

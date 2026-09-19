@@ -53,7 +53,7 @@ export class SzuVenueApi {
     return response.datas?.getOpeningRoom?.rows ?? [];
   }
 
-  async book({ date, modeCode, room, time }) {
+  async book({ date, modeCode, room, time, deadline }) {
     const identity = await this.getIdentity();
     const [start, end] = time.split('-');
     const response = (await this.client.post('sportVenue/insertVenueBookingInfo.do', {
@@ -72,7 +72,11 @@ export class SzuVenueApi {
       YYKS: `${date} ${start}`,
       YYJS: `${date} ${end}`,
       PC_OR_PHONE: 'pc',
-    })).data;
+    }, { deadlineMs: deadline })).data;
+    // HTTP success and valid JSON do not prove the school accepted or rejected a booking.
+    if (!response || Array.isArray(response) || typeof response.code !== 'string' || !response.code.trim()) {
+      throw new Error('预约接口未返回明确业务结果，结果待确认，请核对学校“我的预约”');
+    }
     return response;
   }
 

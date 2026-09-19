@@ -15,7 +15,7 @@ export const device = native ? plugin : {
 export function nativeTransport(device, token = null) {
   return async (url, options) => {
     const result = await device.request({ url: String(url), method: options.method,
-      headers: options.headers, body: options.body?.toString(), token, timeoutMs: 8000 });
+      headers: options.headers, body: options.body?.toString(), token, deadlineMs: options.deadlineMs, timeoutMs: 8000 });
     const values = Object.fromEntries(Object.entries(result.headers).map(([key, value]) => [key.toLowerCase(), value]));
     return { status: result.status, ok: result.status >= 200 && result.status < 300,
       headers: { get: (name) => values[name.toLowerCase()]?.join(', ') ?? null,

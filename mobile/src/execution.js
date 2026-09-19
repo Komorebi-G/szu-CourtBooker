@@ -39,10 +39,19 @@ export class ForegroundExecution {
       plans: snapshot, successes: [], logs: [], items: snapshot.map((p) => ({ id: p.id, name: p.name, status: 'preparing' })) };
     this.current = run;
     this.store.state.runs.unshift(run);
+    let fatalError;
+    const disableNative = () => this.device.setExecution({ token, enabled: false }).catch(() => {});
+    const fail = (error) => {
+      fatalError ??= error;
+      run.error ||= error.message;
+      this.controller.abort(error);
+      void disableNative();
+    };
+    const terminalStatus = () => fatalError ? 'error' : this.reason === 'background' ? 'interrupted' : 'stopped';
     // Keep bounded history, but never silently delete successful/uncertain runs.
     const persist = async () => {
       this.changed();
-      try { await this.store.save(); } catch (error) { this.controller.abort(); throw error; }
+      try { await this.store.save(); } catch (error) { fail(new Error('本地记录保存失败：' + error.message)); throw error; }
     };
     let logWrites = Promise.resolve();
     const log = (level, message, details) => {
@@ -58,6 +67,7 @@ export class ForegroundExecution {
     };
     try {
       await persist();
+      signal.throwIfAborted();
       await this.device.setExecution({ token, enabled: true });
       signal.throwIfAborted();
       // Preflight ALL accounts before sending the first booking request.
@@ -68,10 +78,12 @@ export class ForegroundExecution {
           const account = this.store.state.accounts.find((a) => a.id === plan.accountId);
           if (!account) throw new Error('方案账号不存在');
           const connection = await this.createApi(account, token);
+          signal.throwIfAborted();
           const identity = await connection.api.getIdentity();
           if (account.userId && identity.id !== account.userId) throw new Error(`${account.name} 的登录身份不匹配`);
           account.userId = identity.id; account.user = identity.name; account.verifiedAt = new Date().toISOString();
           await connection.client.flush(); await persist();
+          signal.throwIfAborted();
           clients.set(plan.accountId, connection);
         }
         const { api, client } = clients.get(plan.accountId);
@@ -83,62 +95,91 @@ export class ForegroundExecution {
       }
       signal.throwIfAborted();
       const outcomes = await Promise.allSettled(prepared.map(async ({ plan, api, client, config, targets }) => {
-        const item = run.items.find((i) => i.id === plan.id);
-        const wrapper = Object.create(api);
-        wrapper.book = (input) => enqueue(async () => {
-          if (Date.now() > input.deadline) return { code: 'EXPIRED', msg: '执行窗口已结束' };
-          // Persist the intent before sending: a crash must leave an explicit unknown result.
-          run.inFlight = { plan: plan.name, accountId: plan.accountId, date: input.date, time: input.time, court: input.room.CDMC };
-          await persist(); signal.throwIfAborted();
-          let response;
-          try { response = await api.book(input); }
-          catch (error) {
-            run.error = '预约结果待确认，请到学校核对：' + error.message;
-            this.controller.abort(); throw error;
-          }
-          // Commit success before releasing the global queue, so a different
-          // task cannot overwrite the persisted in-flight request marker.
-          if (response.code === '0') run.successes.push({ planId: plan.id, name: plan.name,
-            accountId: plan.accountId, date: input.date, time: input.time, court: input.room.CDMC, orderId: response.data?.DHID });
-          delete run.inFlight; await persist();
-          return response;
-        });
-        const result = await runBooking({ api: wrapper, client, config, targets, date: plan.date,
-          quota, quotaAccount: this.store.state.accounts.find((a) => a.id === plan.accountId).userId,
-          immediate: mode === 'now', releaseAtServer: mode === 'release' ? bookingReleaseAt(plan.date) : undefined,
-          live: true, signal, log,
-          onState: (status, details) => {
-            Object.assign(item, details, { status });
-            run.status = signal.aborted ? 'stopping' : run.items.some((i) => i.status === 'booking') ? 'booking'
-              : run.items.some((i) => i.status === 'waiting') ? 'waiting' : 'preparing';
-            this.changed();
-          },
-          onSuccess: async () => {} });
-        item.status = result.stopped ? 'stopped' : result.ok ? 'success' : result.missed ? 'missed' : 'error';
-        item.error = result.error;
-        item.limited = result.limited;
-        if (result.error) log('ERROR', `${plan.name}：${result.error}`);
-        await persist(); return result;
+        try {
+          const item = run.items.find((i) => i.id === plan.id);
+          const wrapper = Object.create(api);
+          wrapper.book = (input) => enqueue(async () => {
+            if (Date.now() > input.deadline) return { code: 'EXPIRED', msg: '执行窗口已结束' };
+            // Persist intent before dispatch, but distinguish a cancelled intent from an unknown response.
+            run.inFlight = { plan: plan.name, accountId: plan.accountId, date: input.date, time: input.time, court: input.room.CDMC };
+            let dispatched = false, response;
+            try {
+              await persist(); signal.throwIfAborted();
+              if (!this.isForeground()) { this.stop('background'); signal.throwIfAborted(); }
+              if (Date.now() >= input.deadline) {
+                delete run.inFlight; await persist();
+                return { code: 'EXPIRED', msg: '执行窗口已结束' };
+              }
+              dispatched = true;
+              response = await api.book(input);
+              if (!response || Array.isArray(response) || typeof response.code !== 'string' || !response.code.trim()) {
+                throw new Error('预约接口未返回明确业务结果');
+              }
+            } catch (error) {
+              if (!dispatched || error.code === 'REQUEST_NOT_SENT') {
+                delete run.inFlight;
+                if (error.code === 'REQUEST_NOT_SENT' && !signal.aborted) fail(error);
+                throw error;
+              }
+              fail(new Error('预约结果待确认，请到学校核对：' + error.message));
+              throw error;
+            }
+            // Keep the global queue locked until the response is durable.
+            if (response.code === '0') run.successes.push({ planId: plan.id, name: plan.name,
+              accountId: plan.accountId, date: input.date, time: input.time, court: input.room.CDMC, orderId: response.data?.DHID });
+            delete run.inFlight; await persist();
+            return response;
+          });
+          const result = await runBooking({ api: wrapper, client, config, targets, date: plan.date,
+            quota, quotaAccount: this.store.state.accounts.find((a) => a.id === plan.accountId).userId,
+            immediate: mode === 'now', releaseAtServer: mode === 'release' ? bookingReleaseAt(plan.date) : undefined,
+            live: true, signal, log,
+            onState: (status, details) => {
+              Object.assign(item, details, { status });
+              run.status = signal.aborted ? 'stopping' : run.items.some((i) => i.status === 'booking') ? 'booking'
+                : run.items.some((i) => i.status === 'waiting') ? 'waiting' : 'preparing';
+              this.changed();
+            },
+            onSuccess: async () => {} });
+          item.status = result.stopped ? (fatalError ? 'error' : 'stopped') : result.ok ? 'success' : result.missed ? 'missed' : 'error';
+          item.error = result.error || (fatalError && run.error);
+          item.limited = result.limited;
+          if (result.error) log('ERROR', `${plan.name}：${result.error}`);
+          await persist(); return result;
+        } catch (error) {
+          // Do not leave sibling plans waiting for hours after one worker rejects.
+          fail(error); throw error;
+        }
       }));
       const failed = outcomes.find((o) => o.status === 'rejected');
       if (failed) throw failed.reason;
-      if (run.inFlight) run.error = '有预约请求结果待确认，请核对学校“我的预约”，不要直接重试。';
-      run.status = signal.aborted ? (this.reason === 'background' ? 'interrupted' : 'stopped')
+      if (run.inFlight) run.error ||= '有预约请求结果待确认，请核对学校“我的预约”，不要直接重试。';
+      run.status = signal.aborted ? terminalStatus()
         : outcomes.every((o) => o.value.ok) ? 'success' : run.successes.length ? 'partial' : 'error';
     } catch (error) {
-      run.status = signal.aborted ? (this.reason === 'background' ? 'interrupted' : 'stopped') : 'error';
-      run.error = error.message;
+      run.status = signal.aborted ? terminalStatus() : 'error';
+      run.error = run.error || error.message;
     } finally {
+      // A preflight failure/stop must not leave individual plans showing "preparing" forever.
+      for (const item of run.items) if (['preparing', 'waiting', 'booking'].includes(item.status)) {
+        item.status = signal.aborted && !fatalError ? 'stopped' : 'error';
+        item.error = run.error;
+      }
       run.finishedAt = new Date().toISOString();
-      if (this.reason === 'background') run.error = '离开前台，本次已中断；返回后不会自动续跑。已发出但无结果的请求请到学校核对。';
+      if (this.reason === 'background' && !fatalError) run.error = '离开前台，本次已中断；返回后不会自动续跑。已发出但无结果的请求请到学校核对。';
       await logWrites.catch(() => {});
+      if (fatalError) run.status = 'error';
       try { await this.store.save(); }
+      catch (error) { fail(new Error('本地记录保存失败：' + error.message)); run.status = 'error'; throw error; }
       finally { await this.device.setExecution({ token, enabled: false }).catch(() => {}); this.active = false; this.changed(); }
     }
     return run;
   }
   stop(reason = 'user') {
     if (!this.active) return;
-    this.reason = reason; this.current.status = 'stopping'; this.controller.abort(); this.changed();
+    this.reason = reason; this.current.status = 'stopping'; this.controller.abort();
+    // Invalidate native queued requests and read retries immediately, not after they finish.
+    this.device.setExecution({ token: this.current.id, enabled: false }).catch(() => {});
+    this.changed();
   }
 }

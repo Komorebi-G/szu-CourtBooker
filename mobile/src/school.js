@@ -7,7 +7,7 @@ import { nativeTransport } from './device.js';
 
 export function createConnection(store, device, account, token = null) {
   const client = new CoreHttpClient(account.session, { transport: nativeTransport(device, token),
-    save: async (session) => { account.session = session; await store.save(); } });
+    save: async () => { account.session = client.session; await store.save(); } });
   return { client, api: new SzuVenueApi(client) };
 }
 export async function verifyAccount(store, device, account) {

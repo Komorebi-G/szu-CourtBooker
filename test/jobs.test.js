@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { JobStore, readJson, writeJson, exists } from '../desktop/src/jobs.js';
 import { executeJob } from '../desktop/src/job-worker.js';
-import { runDispatcher, BookingQueue } from '../desktop/src/dispatcher.js';
-import { sleep } from '../shared/utils.js';
-import { windowsArgument, windowsRegistration } from '../desktop/src/native-scheduler.js';
+import { runDispatcher } from '../desktop/src/dispatcher.js';
+import { LiveExecution, BookingQueue } from '../desktop/src/execution.js';
+import { shanghaiDate, addDays, sleep } from '../shared/utils.js';
+import { windowsArgument } from '../desktop/src/native-scheduler.js';
 
 const metadata = { campusList: [{ XQDM: '1', XQDM_DISPLAY: '粤海校区' }],
   xmList: [{ XQDM: '1', XMDM: '001', XMMC: '羽毛球', DCFS: '1.0' }],
@@ -32,17 +33,83 @@ async function fixture(mode = 'now') {
   const store = new JobStore({ dataDir, root: dataDir, scheduler });
   return { dataDir, dir, id, job, api, createApi, store, calls: () => calls };
 }
+test('新版拒绝系统定时创建，临场执行不注册系统任务', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-09-20T12:00:00+08:00') });
+  const f = await fixture(); let starts = 0, registrations = 0;
+  f.store.startJob = () => { starts++; };
+  f.store.scheduler.register = async () => { registrations++; };
+  const target = { ...f.job.config.targets[0], date: addDays(shanghaiDate(), 1) };
+  await assert.rejects(f.store.create(target, f.job.config, 'schedule'), /已移除系统定时/);
+  const job = await f.store.create(target, f.job.config, 'release');
+  assert.equal(job.status, 'queued'); assert.equal(starts, 1); assert.equal(registrations, 0);
+});
+test('旧系统入口只清理定时，不访问学校；失败时仍先阻止旧任务', async () => {
+  const f = await fixture('schedule'); let removals = 0;
+  await runDispatcher(f.dataDir, { scheduler: { async remove() { removals++; } } });
+  assert.equal(removals, 1); assert.equal(await exists(join(f.dir, 'stop')), true);
+  await executeJob(f.dir, { createApi: () => { throw new Error('不得访问学校'); } });
+  assert.equal((await f.store.get(f.id)).status, 'stopped'); assert.equal(f.calls(), 0);
+  const bad = await fixture('schedule'); bad.store.scheduler.remove = async () => { throw new Error('权限不足'); };
+  assert.match((await bad.store.retireSchedules())[0], /权限不足/);
+  assert.equal(await exists(join(bad.dir, 'stop')), true);
+  assert.equal(await exists(join(bad.dir, 'schedule-retired')), false);
+});
+test('中断任务和未经手动启动的任务都不自动执行，成功记录保留', async () => {
+  const f = await fixture();
+  await writeJson(join(f.dir, 'state.json'), { status: 'booking', pid: 99999999,
+    startedAt: new Date().toISOString(), logs: [], successes: [{ time: '19:00-20:00', orderId: 'prior' }] });
+  assert.equal((await f.store.get(f.id)).status, 'interrupted');
+  await executeJob(f.dir, { manualStart: true, createApi: f.createApi });
+  assert.equal(f.calls(), 0); assert.equal((await f.store.get(f.id)).successes.length, 1);
+  const fresh = await fixture(); await executeJob(fresh.dir, { createApi: fresh.createApi });
+  assert.equal(fresh.calls(), 0); assert.equal((await fresh.store.get(fresh.id)).status, 'stopped');
+});
+test('退出助手停止等待，不补跑；在途请求成功仍保存', async () => {
+  for (const waiting of [true, false]) {
+    const f = await fixture(waiting ? 'release' : 'now');
+    f.job.releaseAt = waiting ? Date.now() + 60000 : Date.now();
+    await writeJson(join(f.dir, 'job.json'), f.job);
+    const live = new LiveExecution({ createApi: f.createApi });
+    if (waiting) f.api.sampleServerOffset = async () => { void live.close(); return 0; };
+    else f.api.book = async () => { void live.close(); await sleep(5); return { code: '0' }; };
+    await live.start(f.dir);
+    const state = await f.store.get(f.id);
+    assert.equal(state.status, 'stopped'); assert.equal(state.successes.length, waiting ? 0 : 1);
+    assert.throws(() => live.start(f.dir), /正在退出/);
+  }
+});
+test('同一数据目录的不同助手不能各自发送；当前执行结束后释放锁', async () => {
+  const f = await fixture('release'); f.job.releaseAt = Date.now() + 60_000;
+  await writeJson(join(f.dir, 'job.json'), f.job);
+  const first = new LiveExecution({ dataDir: f.dataDir, createApi: f.createApi });
+  const second = new LiveExecution({ dataDir: f.dataDir, createApi: f.createApi });
+  const work = first.start(f.dir);
+  assert.equal(Number(await readFile(join(f.dataDir, 'dispatcher.lock'), 'utf8')), process.pid);
+  assert.throws(() => second.start(f.dir), /另一个助手实例/);
+  await first.close(); await work;
+  assert.equal(await exists(join(f.dataDir, 'dispatcher.lock')), false);
+  await second.start(f.dir); // A finished record is still never replayed.
+  assert.equal(f.calls(), 0);
+});
+test('崩溃遗留的空执行锁可释放，但不会因此恢复旧任务', async () => {
+  const f = await fixture();
+  const lock = join(f.dataDir, 'dispatcher.lock'); await writeFile(lock, '');
+  await utimes(lock, new Date(0), new Date(0));
+  const live = new LiveExecution({ dataDir: f.dataDir, createApi: f.createApi });
+  await live.start(f.dir);
+  assert.equal(f.calls(), 1); assert.equal(await exists(lock), false);
+});
 test('独立执行保存日志/结果，重复唤起不会再次下单', async () => {
   const f = await fixture();
-  await executeJob(f.dir, { createApi: f.createApi });
-  await executeJob(f.dir, { createApi: f.createApi });
+  await executeJob(f.dir, { manualStart: true, createApi: f.createApi });
+  await executeJob(f.dir, { manualStart: true, createApi: f.createApi });
   const state = await f.store.get(f.id);
   assert.equal(state.status, 'success'); assert.equal(state.successes[0].orderId, 'order-1');
   assert.ok(state.logs.some((line) => line.level === 'OK')); assert.equal(f.calls(), 1);
 });
 test('提前停止的任务即使被系统再次启动也不访问预约接口', async () => {
   const f = await fixture(); await f.store.stop(f.id);
-  await executeJob(f.dir, { createApi: async () => { throw new Error('should not reach API'); } });
+  await executeJob(f.dir, { manualStart: true, createApi: async () => { throw new Error('should not reach API'); } });
   assert.equal((await f.store.get(f.id)).status, 'stopped'); assert.equal(f.calls(), 0);
 });
 test('执行使用任务指定的账号文件，身份改变时不下单', async () => {
@@ -51,25 +118,49 @@ test('执行使用任务指定的账号文件，身份改变时不下单', async
   await writeJson(join(f.dir, 'job.json'), f.job);
   f.api.getIdentity = async () => ({ id: 'wrong-user', name: '其他用户' });
   let usedPath;
-  await executeJob(f.dir, { createApi: async (path) => { usedPath = path; return f.createApi(); } });
+  await executeJob(f.dir, { manualStart: true, createApi: async (path) => { usedPath = path; return f.createApi(); } });
   assert.equal(usedPath, 'roommate-session.json');
   assert.equal((await f.store.get(f.id)).status, 'error');
   assert.match((await f.store.get(f.id)).error, /登录身份/); assert.equal(f.calls(), 0);
 });
-test('错过执行窗口不补交；删除记录移入回收目录', async () => {
-  const f = await fixture('schedule'); f.job.releaseAt = Date.now() - 31 * 60_000;
-  await writeJson(join(f.dir, 'job.json'), f.job);
-  await executeJob(f.dir, { createApi: f.createApi });
-  assert.equal((await f.store.get(f.id)).status, 'missed'); assert.equal(f.calls(), 0);
-  await f.store.remove(f.id);
-  assert.equal(await exists(f.dir), false);
-  assert.equal(await exists(join(f.dataDir, 'trash', f.id, 'state.json')), true);
-});
 test('停止正在提交的任务仍落盘成功结果', async () => {
   const f = await fixture();
   f.api.book = async () => { await writeFile(join(f.dir, 'stop'), 'stop'); await sleep(260); return { code: '0' }; };
-  await executeJob(f.dir, { createApi: f.createApi });
+  await executeJob(f.dir, { manualStart: true, createApi: f.createApi });
   const state = await f.store.get(f.id); assert.equal(state.status, 'stopped'); assert.equal(state.successes.length, 1);
+});
+test('桌面明确未发出的请求不保留待核对意图', async () => {
+  const f = await fixture();
+  f.api.book = async () => { throw Object.assign(new Error('执行窗口已结束，未发送请求'), { code: 'REQUEST_NOT_SENT' }); };
+  await executeJob(f.dir, { manualStart: true, createApi: f.createApi });
+  const state = await f.store.get(f.id);
+  assert.deepEqual(state.pendingRequests, {});
+  assert.match(state.error, /未发送/); assert.doesNotMatch(state.error, /待确认/);
+});
+test('桌面停止时在途请求超时，仍保留待核对记录和提示', async () => {
+  const f = await fixture();
+  f.api.book = async () => { await writeFile(join(f.dir, 'stop'), 'stop'); await sleep(260); throw new Error('timeout'); };
+  await executeJob(f.dir, { manualStart: true, createApi: f.createApi });
+  const state = await f.store.get(f.id);
+  assert.equal(state.status, 'stopped'); assert.equal(Object.keys(state.pendingRequests).length, 1);
+  assert.match(state.error, /待确认/);
+});
+test('桌面请求已记录意图但仍在全局队列中，停止后清除待核对标记', async () => {
+  const f = await fixture(); const queue = new BookingQueue(); let release;
+  const blocker = queue.run(() => new Promise((resolve) => { release = resolve; }));
+  const original = f.api.book;
+  await executeJob(f.dir, { manualStart: true, createApi: async (path, signal) => {
+    signal.addEventListener('abort', () => release(), { once: true });
+    f.api.book = async (input) => {
+      await writeFile(join(f.dir, 'stop'), 'stop');
+      return queue.run(() => original(input), signal);
+    };
+    return f.createApi();
+  } });
+  await blocker;
+  const state = await f.store.get(f.id);
+  assert.equal(f.calls(), 0); assert.equal(state.status, 'stopped');
+  assert.deepEqual(state.pendingRequests, {}); assert.equal(state.error, undefined);
 });
 test('共享预约队列只允许一个请求在途，排队中取消不发出请求', async () => {
   const queue = new BookingQueue(); let inFlight = 0, max = 0, calls = 0;
@@ -87,54 +178,15 @@ test('同一后台执行器接收多个任务并串行发出预约请求', async
   await writeJson(join(dir2, 'state.json'), { status: 'scheduled', logs: [], successes: [] });
   let inFlight = 0, max = 0;
   f.api.book = async () => { inFlight++; max = Math.max(max, inFlight); await sleep(25); inFlight--; return { code: '0' }; };
-  await Promise.all([runDispatcher(f.dataDir, { createApi: f.createApi, idleMs: 10 }),
-    runDispatcher(f.dataDir, { createApi: f.createApi, idleMs: 10 })]);
+  const live = new LiveExecution({ createApi: f.createApi });
+  await Promise.all([live.start(f.dir), live.start(dir2)]);
   assert.equal(max, 1);
   assert.equal((await f.store.get(f.id)).status, 'success');
   assert.equal((await f.store.get(id2)).status, 'success');
   assert.equal(await exists(join(f.dataDir, 'dispatcher.lock')), false);
 });
-test('Windows注册设置定时唤醒、不因电池暂停、最小权限且正确引用路径', () => {
-  const script = windowsRegistration({ id: randomUUID(), at: Date.now() + 1000,
-    executable: 'C:\\Program Files\\node.exe', args: ['C:\\a b\\worker.js', "C:\\user's files\\data"], cwd: 'C:\\a b' });
-  assert.match(script, /WakeToRun/); assert.match(script, /LogonType Interactive/);
-  assert.match(script, /New-ScheduledTaskTrigger -AtLogOn/);
-  assert.match(script, /DontStopIfGoingOnBatteries/); assert.match(script, /user''s files/);
+test('Windows参数仍正确引用带空格路径，供旧入口清理与诊断使用', () => {
   assert.equal(windowsArgument('a b'), '"a b"');
-});
-test('迟到15分钟仍可启动，并从实际开始获得完整持续时间', async () => {
-  const f = await fixture('schedule'); f.job.releaseAt = Date.now() - 15 * 60000;
-  await writeJson(join(f.dir, 'job.json'), f.job);
-  const started = Date.now();
-  await executeJob(f.dir, { createApi: f.createApi });
-  const state = await f.store.get(f.id);
-  assert.equal(state.status, 'success'); assert.equal(f.calls(), 1);
-  assert.ok(state.deadline >= started + f.job.config.scheduler.timeoutMs);
-});
-test('重启恢复跳过已成功时段，保留同场优先；终态不重跑', async () => {
-  const f = await fixture('schedule'); f.job.releaseAt = Date.now() - 60000;
-  f.job.config.targets[0].times = ['19:00-20:00', '20:00-21:00']; f.job.config.targets[0].preferSameCourt = true;
-  await writeJson(join(f.dir, 'job.json'), f.job);
-  await writeJson(join(f.dir, 'state.json'), { status: 'booking', recoveryVersion: 1, pid: 99999999,
-    startedAt: new Date(Date.now() - 60000).toISOString(), attempt: 1, logs: [],
-    successes: [{ date: f.job.config.targets[0].date, time: '19:00-20:00', court: 'A', room: { WID: 'A', CDMC: 'A', CGBM: 'v' }, orderId: 'prior' }] });
-  const times = []; f.api.book = async ({ time }) => { times.push(time); return { code: '0' }; };
-  await executeJob(f.dir, { createApi: f.createApi });
-  await executeJob(f.dir, { createApi: f.createApi });
-  assert.deepEqual(times, ['20:00-21:00']); const state = await f.store.get(f.id);
-  assert.equal(state.successes.length, 2); assert.equal(state.attempt, 2); assert.equal(state.status, 'success');
-});
-test('中断请求先核对学校有效订单；不重复提交', async () => {
-  const f = await fixture('schedule'); f.job.releaseAt = Date.now() - 60000;
-  await writeJson(join(f.dir, 'job.json'), f.job);
-  const date = f.job.config.targets[0].date;
-  await writeJson(join(f.dir, 'state.json'), { status: 'booking', recoveryVersion: 1, pid: 99999999,
-    startedAt: new Date().toISOString(), logs: [], successes: [], pendingRequests: { key: {
-      date, time: '19:00-20:00', room: { WID: 'A', CDMC: 'A', XMDM: '001' } } } });
-  f.api.getBookings = async () => ({ rows: [{ CDWID: 'A', XMDM: '001', YYSJD: `${date} 19:00~${date} 20:00`, YYZT_DISPLAY: '已预约', DHID: 'recovered' }], totalSize: 1 });
-  await executeJob(f.dir, { createApi: f.createApi });
-  const state = await f.store.get(f.id); assert.equal(state.status, 'success');
-  assert.equal(state.successes[0].orderId, 'recovered'); assert.equal(f.calls(), 0);
 });
 test('桌面并发任务同账号项目合计两个时段后正常完成', async () => {
   const f = await fixture(); const id2 = randomUUID(), dir2 = join(f.dataDir, 'jobs', id2);
@@ -143,19 +195,9 @@ test('桌面并发任务同账号项目合计两个时段后正常完成', async
   await writeJson(join(dir2, 'job.json'), { ...f.job, id: id2, taskId: 'task-2', config: { ...f.job.config,
     targets: [{ ...f.job.config.targets[0], times: ['19:00-20:00', '20:00-21:00'] }] } });
   await writeJson(join(dir2, 'state.json'), { status: 'scheduled', logs: [], successes: [] });
-  await runDispatcher(f.dataDir, { createApi: f.createApi, idleMs: 10 });
+  const live = new LiveExecution({ createApi: f.createApi });
+  await Promise.all([live.start(f.dir), live.start(dir2)]);
   const states = await Promise.all([f.store.get(f.id), f.store.get(id2)]);
   assert.equal(f.calls(), 2); assert.ok(states.every((s) => s.status === 'success'));
   assert.ok(states.some((s) => s.limited));
-});
-test('桌面恢复两个已成功时段：其余候选不再提交', async () => {
-  const f = await fixture('schedule'); f.job.releaseAt = Date.now() - 60000;
-  f.job.config.targets[0].times = ['17:00-18:00', '18:00-19:00', '19:00-20:00'];
-  await writeJson(join(f.dir, 'job.json'), f.job);
-  await writeJson(join(f.dir, 'state.json'), { status: 'booking', recoveryVersion: 1, pid: 99999999,
-    startedAt: new Date().toISOString(), logs: [], successes: ['17:00-18:00', '18:00-19:00'].map((time) => ({
-      date: f.job.config.targets[0].date, time, room: { WID: 'A', CDMC: 'A', CGBM: 'v', XMDM: '001' } })) });
-  await runDispatcher(f.dataDir, { createApi: f.createApi, idleMs: 10 });
-  const state = await f.store.get(f.id);
-  assert.equal(state.status, 'success'); assert.equal(state.limited, true); assert.equal(f.calls(), 0);
 });

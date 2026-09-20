@@ -12,7 +12,8 @@ import { SzuVenueApi } from '../../shared/api.js';
 import { HttpClient } from './http-client.js';
 import { resolveTargets } from '../../shared/planner.js';
 import { PROJECTS, getProject, projectForTarget } from '../../shared/projects.js';
-import { defaultTargetDate, bookingReleaseAt } from '../../shared/runner.js';
+import { defaultTargetDate, bookingReleaseAt, validateExecutionStart } from '../../shared/runner.js';
+import { LiveExecution } from './execution.js';
 import { JobStore, JOB_ACTIVE } from './jobs.js';
 import { NativeScheduler } from './native-scheduler.js';
 import { loadSession } from './session.js';
@@ -38,9 +39,12 @@ const host = process.env.WEB_HOST || (isWsl ? '0.0.0.0' : '127.0.0.1');
 const shouldOpen = !args.includes('--no-open');
 
 const authState = { status: 'idle', logs: [], startedAt: null, finishedAt: null };
-const worker = join(root, 'src', 'dispatcher.js');
-const scheduler = new NativeScheduler({ root, worker });
-const jobs = new JobStore({ root, worker, sessionPath, scheduler, dataDir: resolve(process.env.SZU_DATA || join(root, '.data')) });
+const scheduler = new NativeScheduler();
+const dataDir = resolve(process.env.SZU_DATA || join(root, '.data'));
+const execution = new LiveExecution({ dataDir });
+const jobs = new JobStore({ sessionPath, scheduler, execution, startJob: (dir) => { execution.start(dir); },
+  dataDir });
+let legacyCleanup = Promise.resolve([]);
 const accounts = new AccountStore({ dataDir: jobs.dataDir, legacySessionPath: sessionPath });
 let authChild = null;
 // Fail at startup with a useful diagnostic rather than serving a blank 404 page.
@@ -112,7 +116,7 @@ function publicConfig(config) {
         accountId: target.accountId ?? 'default',
         date: target.date ?? defaultTargetDate(config),
         preferSameCourt: target.preferSameCourt ?? project?.id === 'volleyball',
-        startAt: target.startAt ?? bookingReleaseAt(target.date ?? defaultTargetDate(config)),
+        releaseAt: bookingReleaseAt(target.date ?? defaultTargetDate(config)),
         intervalMs: target.intervalMs ?? 100,
         durationMs: target.durationMs ?? 60_000,
         name: target.name,
@@ -220,18 +224,16 @@ function taskFromBody(input, current) {
   const date = resolveDate(input.date);
   if (date < shanghaiDate() || date > addDays(shanghaiDate(), 7)) throw new Error('请选择今天至未来第七天的日期');
   if (typeof input.preferSameCourt !== 'boolean') throw new Error('请选择是否优先同一场地');
-  const startAt = Number(input.startAt);
   const intervalMs = Number(input.intervalMs);
   const durationMs = Number(input.durationMs);
-  if (!Number.isFinite(startAt) || !Number.isFinite(new Date(startAt).getTime())) throw new Error('请选择有效的开始时间');
   if (!Number.isFinite(intervalMs) || intervalMs < 100 || intervalMs > 3_600_000) throw new Error('重试间隔须在 0.1 秒至 1 小时之间');
   if (!Number.isFinite(durationMs) || durationMs < 1000 || durationMs > 86_400_000) throw new Error('持续时间须在 1 秒至 24 小时之间');
   return {
-    ...(current ?? {}),
+    ...Object.fromEntries(Object.entries(current ?? {}).filter(([key]) => key !== 'startAt')),
     id: current?.id ?? randomUUID(),
     accountId: input.accountId ?? current?.accountId ?? 'default',
     date,
-    startAt, intervalMs, durationMs,
+    intervalMs, durationMs,
     preferSameCourt: input.preferSameCourt,
     name: String(input.name || `${project.label}预约`).trim(),
     project: project.id,
@@ -286,7 +288,7 @@ async function startAuthentication(accountId = 'default') {
 
 async function ensureAccountIdle(id) {
   if (authChild && authState.accountId === id) throw new Error('此账号正在登录，请等待登录结束');
-  if ((await jobs.list()).some((job) => job.accountId === id && ['preparing', 'checking', 'waiting', 'booking', 'stopping'].includes(job.status))) {
+  if ((await jobs.list()).some((job) => job.accountId === id && ['queued', 'preparing', 'checking', 'waiting', 'booking', 'stopping'].includes(job.status))) {
     throw new Error('此账号正在执行任务，请先停止后再替换登录');
   }
 }
@@ -296,7 +298,7 @@ async function taskJobs(taskId) {
 }
 async function ensureEditable(taskId) {
   if ((await taskJobs(taskId)).some((job) => JOB_ACTIVE.includes(job.status))) {
-    throw new Error('请先停止并取消该任务的定时安排');
+    throw new Error('请先停止本次执行');
   }
 }
 function normalizeTargets(config) {
@@ -320,19 +322,23 @@ async function handleApi(request, response, url) {
   if (method === 'GET' && url.pathname === '/api/bootstrap') {
     return json(response, 200, { ok: true, app: 'szu-court-booker', config: publicConfig(await loadConfig(configPath)),
       session: await sessionSummary(), accounts: await accounts.list(), auth: authState, jobs: await jobs.list(),
-      serverDate: shanghaiDate(), scheduler: scheduler.description });
+      serverDate: shanghaiDate(), executionMode: 'manual', legacyCleanupErrors: await legacyCleanup });
   }
   if (method === 'GET' && url.pathname === '/api/jobs') {
     return json(response, 200, { ok: true, jobs: await jobs.list() });
   }
   const jobMatch = /^\/api\/jobs\/([a-f0-9-]+)(?:\/(stop))?$/.exec(url.pathname);
   if (jobMatch) {
-    if (method === 'POST' && jobMatch[2]) return json(response, 200, { ok: true, job: await jobs.stop(jobMatch[1]) });
+    if (method === 'POST' && jobMatch[2]) {
+      execution.stop(jobs.path(jobMatch[1]));
+      return json(response, 200, { ok: true, job: await jobs.stop(jobMatch[1]) });
+    }
     if (method === 'DELETE') { await jobs.remove(jobMatch[1]); return json(response, 200, { ok: true }); }
   }
 
   if (method === 'POST' && url.pathname === '/api/app/quit') {
     if (authChild) throw new Error('登录引导正在运行，请完成后再退出');
+    await execution.close();
     json(response, 200, { ok: true });
     setTimeout(() => { server.close(); server.closeAllConnections(); }, 100);
     return;
@@ -393,14 +399,15 @@ async function handleApi(request, response, url) {
     const old = config.targets[index];
     await ensureEditable(old.id ?? String(index));
     if (taskMatch[2] && method === 'POST') {
+      await legacyCleanup;
       const input = await bodyJson(request);
-      if (!['schedule', 'now', 'check'].includes(input.mode)) throw new Error('无效执行方式');
+      if (execution.closing) throw new Error('程序正在退出');
+      validateExecutionStart(input.mode, old.date ?? defaultTargetDate(config));
       if (input.mode !== 'check' && input.confirm !== 'SUBMIT') throw new Error('请明确确认提交真实预约');
       normalizeTargets(config);
       const target = config.targets[index];
       if (target.date < shanghaiDate() || target.date > addDays(shanghaiDate(), 7)) throw new Error('预约日期已过期或超出未来七天，请编辑日期');
       if (input.mode === 'now') {
-        if (bookingReleaseAt(target.date) > Date.now()) throw new Error('尚未放号，请选择定时预约');
         if (target.times.some((time) => Date.parse(target.date + 'T' + time.split('-')[0] + ':00+08:00') <= Date.now())) {
           throw new Error('有时段已经开始，请编辑任务移除已过期时段');
         }
@@ -467,6 +474,12 @@ const server = createServer(async (request, response) => {
       else {
         const origin = request.headers.origin;
         if (origin && origin !== url.origin) throw new Error('不接受其他网站发起的修改请求');
+        // A slow login/start request must never hold Stop/Exit behind it.
+        if (request.method === 'POST' && (url.pathname === '/api/app/quit'
+          || /^\/api\/jobs\/[a-f0-9-]+\/stop$/.test(url.pathname))) {
+          await handleApi(request, response, url);
+          return;
+        }
         const pending = mutationQueue.then(() => handleApi(request, response, url));
         mutationQueue = pending.catch(() => {});
         await pending;
@@ -503,7 +516,12 @@ try {
   console.log(`场馆预约助手${reused ? '已在运行' : '已启动'}：${url}`);
   if (!reused) {
     console.log('Cookie 和配置只保存在本机。按 Ctrl+C 停止。');
-    void jobs.resumeDue().catch((error) => console.error('恢复预约执行器失败：' + error.message));
+    legacyCleanup = jobs.retireSchedules().catch((error) => [`旧定时项清理失败：${error.message}`]);
+    const shutdown = async () => {
+      await execution.close();
+      server.close(); server.closeAllConnections();
+    };
+    process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
   }
   if (shouldOpen) openBrowser(url);
 } catch (error) {

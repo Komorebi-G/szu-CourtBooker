@@ -12,6 +12,9 @@ export class MobileStore {
       for (const run of this.state.runs) if (!run.finishedAt) {
         run.status = 'interrupted'; run.error = '上次执行已中断，未自动重跑。请先核对学校预约，再执行剩余时段。';
         run.finishedAt = new Date().toISOString();
+        for (const item of run.items ?? []) if (['preparing', 'waiting', 'booking', 'stopping'].includes(item.status)) {
+          item.status = 'interrupted'; item.error = run.error;
+        }
       }
       await this.save();
     }

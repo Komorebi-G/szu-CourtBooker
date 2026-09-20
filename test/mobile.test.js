@@ -20,7 +20,7 @@ function fixture() {
     async getOpeningRooms() { return [{ WID: 'court', CDMC: '1号场', CGBM: 'v' }]; },
     async book({ time }) { calls.push([account.id, time]); return { code: '0', data: { DHID: 'order' } }; },
   } });
-  const plan = { id: 'p', name: '羽毛球', project: 'badminton', accountId: 'a', date: addDays(shanghaiDate(), 1),
+  const plan = { id: 'p', name: '羽毛球', project: 'badminton', accountId: 'a', date: shanghaiDate(),
     times: ['15:00-16:00', '16:00-17:00'], courts: ['court'], intervalMs: 250, durationMs: 1000, preferSameCourt: true };
   const runner = new ForegroundExecution({ store, device, createApi });
   return { runner, device, store, plan, calls, armed, createApi, saved: () => JSON.parse(saved) };
@@ -45,10 +45,24 @@ test('手机切后台：不再发后续请求；在途成功仍保存；重开�
   const restored = new MobileStore(f.device); await restored.load(); assert.equal(f.calls.length, 1);
 });
 test('手机进程被杀恢复为中断，不丢成功和未知请求', async () => {
-  const f = fixture(); f.store.state.runs.push({ id: 'crashed', status: 'booking', successes: [{ time: '15:00-16:00' }], inFlight: { time: '16:00-17:00' } });
+  const f = fixture(); f.store.state.runs.push({ id: 'crashed', status: 'booking', successes: [{ time: '15:00-16:00' }], inFlight: { time: '16:00-17:00' },
+    items: [{ id: 'done', status: 'success' }, { id: 'pending', status: 'booking' }] });
   await f.store.save(); const restored = new MobileStore(f.device); await restored.load();
   assert.equal(restored.state.runs[0].status, 'interrupted'); assert.equal(restored.state.runs[0].successes.length, 1);
   assert.ok(restored.state.runs[0].inFlight); assert.equal(f.calls.length, 0);
+  assert.deepEqual(restored.state.runs[0].items.map((item) => item.status), ['success', 'interrupted']);
+});
+test('手机仅部分时段成功，方案和批次均显示部分成功', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const f = fixture();
+  f.runner.createApi = async (...args) => { const c = await f.createApi(...args);
+    c.api.book = async ({ time }) => {
+      if (time === f.plan.times[0]) return { code: '0' };
+      t.mock.timers.tick(1100); return { code: '1', msg: '无空位' };
+    }; return c; };
+  const run = await f.runner.start([f.plan], 'now');
+  assert.equal(run.status, 'partial'); assert.equal(run.items[0].status, 'partial');
+  assert.equal(f.saved().runs[0].successes.length, 1);
 });
 test('手机请求结果未知：停止整个批次，不盲目重试', async () => {
   const f = fixture(); let calls = 0;
@@ -88,8 +102,9 @@ test('用户停止立即撤销原生执行令牌，前置请求结束后不再�
   release(); const run = await work;
   assert.equal(run.status, 'stopped'); assert.equal(run.items[0].status, 'stopped'); assert.equal(f.calls.length, 0);
 });
-test('未来放号任务点击后先校验身份，但停止等待前不会下单', async () => {
-  const f = fixture(); f.plan.date = addDays(shanghaiDate(), 2);
+test('未来放号任务点击后先校验身份，但停止等待前不会下单', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-09-20T12:00:00+08:00') });
+  const f = fixture(); f.plan.date = addDays(shanghaiDate(), 1);
   let identities = 0;
   f.runner.createApi = async (...args) => { const c = await f.createApi(...args);
     const getIdentity = c.api.getIdentity; c.api.getIdentity = async () => { identities++; return getIdentity(); }; return c; };
@@ -136,8 +151,9 @@ test('异步日志写盘失败必须显示存储错误，不能只显示已停�
   assert.equal(run.status, 'error'); assert.match(run.error, /磁盘写入失败/);
   assert.equal(f.calls.length, 0); assert.equal(f.runner.active, false);
 });
-test('一个方案收尾异常，必须中止仍在等明天放号的其他方案', async () => {
-  const f = fixture(); f.plan.date = addDays(shanghaiDate(), 2);
+test('一个方案收尾异常，必须中止仍在等明天放号的其他方案', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-09-20T12:00:00+08:00') });
+  const f = fixture(); f.plan.date = addDays(shanghaiDate(), 1);
   f.runner.createApi = async (account) => {
     const c = await f.createApi(account); let flushes = 0;
     if (account.id === 'a') {

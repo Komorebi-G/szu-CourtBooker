@@ -49,7 +49,7 @@ function render() {
       <div class="task-content"><div class="chips">${p.times.map((t) => `<span class="chip">${escape(t)}</span>`).join('')}</div><p class="court-description">${escape(courtDescription(p))}</p><p class="same-court">${p.preferSameCourt ? '✓ 优先同一场地' : '各时段按原顺序尝试'}</p></div>
       <p class="plan-timing">放号：${format(bookingReleaseAt(p.date))}（北京时间）<br>每 ${p.intervalMs / 1000} 秒重试 · 最长 ${p.durationMs / 60000} 分钟</p>
       <div class="task-actions"><button class="text-button" data-edit="${p.id}" ${execution.active ? 'disabled' : ''}>编辑</button><button class="text-button danger-text" data-delete="${p.id}" ${execution.active ? 'disabled' : ''}>删除</button></div></article>`).join('') : '<div class="empty">先登录或导入账号，再新建预约方案。<br>方案可以保存，但不会在后台自行启动。</div>';
-    $('#accounts').innerHTML = store.state.accounts.length ? store.state.accounts.map((a) => `<article class="task-card"><h3>${escape(a.name)}</h3><p class="task-date">${a.verifiedAt ? '已验证：' + escape(a.user) : '登录已保存，尚未验证'}</p><div class="task-actions">
+    $('#accounts').innerHTML = store.state.accounts.length ? store.state.accounts.map((a) => `<article class="task-card"><h3>${escape(a.name)}</h3><p class="task-date">${a.verifiedAt ? '上次验证：' + escape(a.user) + ' · ' + escape(format(a.verifiedAt)) + '（启动时重新验证）' : '登录已保存，尚未验证'}</p><div class="task-actions">
       <button class="secondary" data-relogin="${a.id}" ${execution.active ? 'disabled' : ''}>重新登录</button><button class="text-button" data-verify="${a.id}" ${execution.active ? 'disabled' : ''}>验证</button><button class="text-button" data-export="${a.id}">查看 / 复制 JSON</button><button class="text-button" data-update="${a.id}" ${execution.active ? 'disabled' : ''}>导入更新</button><button class="text-button danger-text" data-remove="${a.id}" ${execution.active ? 'disabled' : ''}>删除</button></div></article>`).join('') : '<div class="empty">点击“学校登录”，直接在手机上连接账号。<br>也可导入 JSON，多位用户独立保存。</div>';
   }
   renderProgress();
@@ -217,6 +217,7 @@ $('#begin').onclick = action(() => {
   if (prior.length && !confirm('所选账号和日期已有成功或结果待确认的记录。请先到学校“我的预约”核对，并移除已约时段，避免重复提交。确认仍要继续？')) return;
   $('#confirmPlans').textContent = plans.map((p) => `${p.name} · ${accountName(p.accountId)}\n使用场地：${p.date} ${p.times.join('、')}\n放号：${format(bookingReleaseAt(p.date))}（北京时间）`).join('\n\n');
   const released = plans.some((p) => bookingReleaseAt(p.date) <= Date.now());
+  if (plans.some((p) => shanghaiDate(bookingReleaseAt(p.date)) > shanghaiDate())) throw new Error('请在放号当天登录并启动；方案已保存，无需提前守候');
   document.querySelector('input[name=mode][value=release]').disabled = released;
   document.querySelector(`input[name=mode][value=${released ? 'now' : 'release'}]`).checked = true;
   $('#confirmDialog').showModal();

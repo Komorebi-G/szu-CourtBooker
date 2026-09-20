@@ -25,14 +25,26 @@ async function writeSession(session, absolute) {
   }
 }
 
-export function saveSession(session, path = DEFAULT_SESSION_FILE) {
+function sessionTransaction(path, operation) {
   const absolute = resolve(path);
   const previous = saveQueues.get(absolute) ?? Promise.resolve();
-  const pending = previous.catch(() => {}).then(() => writeSession(session, absolute));
+  const pending = previous.catch(() => {}).then(() => operation(absolute));
   saveQueues.set(absolute, pending);
   return pending.finally(() => {
     if (saveQueues.get(absolute) === pending) saveQueues.delete(absolute);
   });
+}
+
+export function saveSession(session, path = DEFAULT_SESSION_FILE) {
+  const snapshot = structuredClone(session);
+  return sessionTransaction(path, (absolute) => writeSession(snapshot, absolute));
+}
+
+// Requests and imports share one per-file queue. A response's refreshed cookies
+// must be durable before another client reads and sends this account's session.
+export function withSession(path, operation) {
+  return sessionTransaction(path, async (absolute) => operation(await loadSession(absolute),
+    (session) => writeSession(session, absolute)));
 }
 
 export async function loadSession(path = DEFAULT_SESSION_FILE) {

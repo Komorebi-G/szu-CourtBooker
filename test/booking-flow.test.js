@@ -66,6 +66,12 @@ test('等待中停止很快退出，零预约请求', async () => {
   setTimeout(() => controller.abort(), 20);
   const result = await work; assert.equal(result.stopped, true); assert.equal(attempts.length, 0);
 });
+test('倒计时后登录已失效，停止并提示重新登录，不发预约', async () => {
+  const { args, api, attempts } = fixture();
+  api.getIdentity = async ({ refresh }) => { assert.equal(refresh, true); throw new Error('登录失效，请重新登录'); };
+  const result = await runBooking({ ...args, immediate: false, releaseAtServer: Date.now() });
+  assert.equal(attempts.length, 0); assert.match(result.error, /重新登录/);
+});
 test('请求已发出时停止，仍保存成功结果，不尝试下一时段', async () => {
   const { args, api, attempts } = fixture(); const controller = new AbortController();
   api.book = async ({ time, room }) => { attempts.push([time, room.WID]); controller.abort(); await sleep(5); return { code: '0' }; };
@@ -77,11 +83,36 @@ test('POST超时结果未知时停止，避免重复提交', async () => {
   api.book = async () => { calls++; throw new Error('timeout'); };
   const result = await runBooking(args); assert.equal(calls, 1); assert.match(result.error, /结果待确认/);
 });
+test('并发候选已排队：首单结果未知后不得发送剩余时段', async () => {
+  const { args, api } = fixture({ preferSameCourt: false }); let calls = 0;
+  api.book = async () => { calls++; throw new Error('timeout'); };
+  const result = await runBooking(args);
+  assert.equal(calls, 1); assert.match(result.error, /结果待确认/);
+});
+test('停止发生在已发送请求期间，超时的核对提示不能丢失', async () => {
+  const { args, api } = fixture(); const controller = new AbortController();
+  api.book = async () => { controller.abort(); throw new Error('timeout'); };
+  const result = await runBooking({ ...args, signal: controller.signal });
+  assert.equal(result.stopped, true); assert.match(result.error, /结果待确认/);
+});
+test('明确未发送的请求保留真实原因，不误报结果未知', async () => {
+  const { args, api } = fixture({ preferSameCourt: false }); let calls = 0;
+  api.book = async () => { calls++; throw Object.assign(new Error('执行窗口已结束，未发送请求'), { code: 'REQUEST_NOT_SENT' }); };
+  const result = await runBooking(args);
+  assert.equal(calls, 1); assert.match(result.error, /未发送/); assert.doesNotMatch(result.error, /待确认/);
+});
 test('重复项目时段交给学校接口判断，执行器不按本地任务拦截', async () => {
   const { args, target, attempts } = fixture({ times: ['19:00-20:00'] });
   args.targets.push({ ...target, name: '第二个任务', targetIndex: 1 });
   const result = await runBooking(args);
   assert.equal(result.successes.length, 2); assert.equal(attempts.length, 2);
+});
+test('单个方案误填重复时段只执行一次，保留其他候选', async () => {
+  const { args, attempts } = fixture({ preferSameCourt: false,
+    times: ['19:00-20:00', '19:00-20:00', '20:00-21:00'] });
+  const result = await runBooking(args);
+  assert.equal(result.total, 2); assert.equal(result.successes.length, 2);
+  assert.deepEqual(attempts.map(([time]) => time), ['19:00-20:00', '20:00-21:00']);
 });
 test('默认前一天12:30，闰月与跨月日期正确', () => {
   assert.equal(bookingReleaseAt('2028-03-01'), Date.parse('2028-02-29T12:30:00+08:00'));

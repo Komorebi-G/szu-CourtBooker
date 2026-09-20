@@ -7,6 +7,19 @@ export function bookingReleaseAt(date) {
   return releaseEpoch(addDays(date, -1), '12:30:00');
 }
 
+export function validateExecutionStart(mode, date, now = Date.now()) {
+  if (!['release', 'now', 'check'].includes(mode)) throw new Error('已移除系统定时，请手动开始本次执行');
+  if (mode === 'check') return now;
+  const release = bookingReleaseAt(date);
+  if (mode === 'now') {
+    if (release > now) throw new Error('尚未放号，请在放号当天启动倒计时');
+    return now;
+  }
+  if (release <= now) throw new Error('放号时间已过，请选择立即尝试');
+  if (shanghaiDate(release) !== shanghaiDate(now)) throw new Error('请在放号当天登录并启动倒计时；方案已保存，无需提前守候');
+  return release;
+}
+
 export async function waitForRelease({ api, scheduler, immediate, log, signal, releaseAtServer,
   onState = () => {} }) {
   signal?.throwIfAborted();
@@ -75,7 +88,7 @@ export async function runBooking({ api, client, config, targets, date, immediate
         return index < 0 ? Number.MAX_SAFE_INTEGER : index;
       };
       rooms.sort((a, b) => rank(a) - rank(b));
-      return [...target.times].sort().map((time, timeIndex) => ({ target, date, time, timeIndex, rooms,
+      return [...new Set(target.times)].sort().map((time, timeIndex) => ({ target, date, time, timeIndex, rooms,
         key: `${target.targetIndex}|${date}|${time}` }));
     });
     tasks = batches.flat();
@@ -100,6 +113,8 @@ export async function runBooking({ api, client, config, targets, date, immediate
       return result({ ok: true, executionTasks: tasks });
     }
     const { releaseAt } = await waitForRelease({ api, scheduler, immediate, log, signal, releaseAtServer, onState });
+    // A successful check before a countdown is not proof of a live session now.
+    if (!immediate && api.getIdentity) await api.getIdentity({ refresh: true });
     if (Date.now() > latestStartAt) return result({ missed: true });
     const deadline = (resetDurationOnStart ? Math.max(Date.now(), releaseAt) : releaseAt) + scheduler.timeoutMs;
     if (Date.now() > deadline) return result({ missed: true });
@@ -116,19 +131,25 @@ export async function runBooking({ api, client, config, targets, date, immediate
         if (fatalError) throw fatalError;
         if (Date.now() > deadline) return;
         const label = `${task.target.name} / ${task.time} / ${room.CDMC}`;
-        let response;
-        try {
-          // Wait for an already sent request so its result is not lost on Stop.
-          response = await quota.attempt(quotaKey(task), task.time, () => {
-            signal?.throwIfAborted();
-            if (Date.now() > deadline) return { code: 'EXPIRED', msg: '执行窗口已结束' };
-            return api.book({ date, modeCode: task.target.modeCode, room, time: task.time, deadline });
-          });
-        } catch (error) {
-          fatalError = error instanceof SessionExpiredError ? error
-            : new Error(`预约结果待确认：${label}。请查看学校“我的预约”后再操作。${error.message}`);
-          throw fatalError;
-        }
+        // Wait for an already sent request so its result is not lost on Stop.
+        const response = await quota.attempt(quotaKey(task), task.time, async () => {
+          signal?.throwIfAborted();
+          if (fatalError) throw fatalError;
+          if (Date.now() >= deadline) return { code: 'EXPIRED', msg: '执行窗口已结束' };
+          try {
+            return await api.book({ date, modeCode: task.target.modeCode, room, time: task.time, deadline, signal });
+          } catch (error) {
+            // Record failure before releasing the quota queue: sibling slots may
+            // already be queued and must not dispatch after an unknown result.
+            if (error.code === 'REQUEST_NOT_SENT') {
+              if (!signal?.aborted) fatalError ??= error;
+            } else {
+              fatalError ??= error instanceof SessionExpiredError ? error
+                : new Error(`预约结果待确认：${label}。请查看学校“我的预约”后再操作。${error.message}`);
+            }
+            throw fatalError ?? error;
+          }
+        });
         if (response.code === 'LOCAL_DAILY_LIMIT') return;
         if (response.code === '0') {
           completed.set(task.key, room);
@@ -156,7 +177,10 @@ export async function runBooking({ api, client, config, targets, date, immediate
     log(tasks.every(done) ? 'OK' : 'WARN', `预约结束：${completed.size}/${total} 个时段成功`);
     return result();
   } catch (error) {
-    if (signal?.aborted) return result({ stopped: true });
+    if (signal?.aborted) {
+      if (fatalError) log('ERROR', fatalError.message);
+      return result({ stopped: true, ...(fatalError ? { ok: false, error: fatalError.message } : {}) });
+    }
     log('ERROR', error.message);
     return result({ ok: false, error: error.message });
   } finally {

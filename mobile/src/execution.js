@@ -1,7 +1,9 @@
-import { runBooking, bookingReleaseAt } from '../../shared/runner.js';
+import { runBooking, bookingReleaseAt, validateExecutionStart } from '../../shared/runner.js';
 import { resolveTargets } from '../../shared/planner.js';
 import { PROJECTS } from '../../shared/projects.js';
 import { BookingQuota } from '../../shared/booking-quota.js';
+import { RequestNotSentError } from '../../shared/errors.js';
+import { withBooking } from '../../shared/api.js';
 import { shanghaiDate, addDays, splitTimeSlot, resolveDate } from '../../shared/utils.js';
 
 export function validatePlan(plan) {
@@ -31,7 +33,7 @@ export class ForegroundExecution {
     if (!this.isForeground()) throw new Error('请保持 App 在前台');
     const snapshot = structuredClone(plans);
     snapshot.forEach(validatePlan);
-    if (mode === 'release' && snapshot.some((p) => bookingReleaseAt(p.date) <= Date.now())) throw new Error('存在已放号日期，请选择“立即尝试”或调整方案');
+    snapshot.forEach((plan) => validateExecutionStart(mode, plan.date));
     const token = crypto.randomUUID();
     this.active = true; this.reason = null; this.controller = new AbortController();
     const signal = this.controller.signal;
@@ -62,7 +64,10 @@ export class ForegroundExecution {
     let queue = Promise.resolve();
     const quota = new BookingQuota();
     const enqueue = (operation) => {
-      const work = queue.then(() => { signal.throwIfAborted(); if (!this.isForeground()) throw new Error('App 已离开前台'); return operation(); });
+      const work = queue.then(() => {
+        if (signal.aborted || !this.isForeground()) throw new RequestNotSentError('执行已停止或 App 已离开前台，未发送请求');
+        return operation();
+      });
       queue = work.catch(() => {}); return work;
     };
     try {
@@ -97,8 +102,7 @@ export class ForegroundExecution {
       const outcomes = await Promise.allSettled(prepared.map(async ({ plan, api, client, config, targets }) => {
         try {
           const item = run.items.find((i) => i.id === plan.id);
-          const wrapper = Object.create(api);
-          wrapper.book = (input) => enqueue(async () => {
+          const wrapper = withBooking(api, (input) => enqueue(async () => {
             if (Date.now() > input.deadline) return { code: 'EXPIRED', msg: '执行窗口已结束' };
             // Persist intent before dispatch, but distinguish a cancelled intent from an unknown response.
             run.inFlight = { plan: plan.name, accountId: plan.accountId, date: input.date, time: input.time, court: input.room.CDMC };
@@ -119,6 +123,7 @@ export class ForegroundExecution {
               if (!dispatched || error.code === 'REQUEST_NOT_SENT') {
                 delete run.inFlight;
                 if (error.code === 'REQUEST_NOT_SENT' && !signal.aborted) fail(error);
+                if (!dispatched) throw new RequestNotSentError(error.message, { cause: error });
                 throw error;
               }
               fail(new Error('预约结果待确认，请到学校核对：' + error.message));
@@ -129,7 +134,7 @@ export class ForegroundExecution {
               accountId: plan.accountId, date: input.date, time: input.time, court: input.room.CDMC, orderId: response.data?.DHID });
             delete run.inFlight; await persist();
             return response;
-          });
+          }));
           const result = await runBooking({ api: wrapper, client, config, targets, date: plan.date,
             quota, quotaAccount: this.store.state.accounts.find((a) => a.id === plan.accountId).userId,
             immediate: mode === 'now', releaseAtServer: mode === 'release' ? bookingReleaseAt(plan.date) : undefined,
@@ -141,7 +146,8 @@ export class ForegroundExecution {
               this.changed();
             },
             onSuccess: async () => {} });
-          item.status = result.stopped ? (fatalError ? 'error' : 'stopped') : result.ok ? 'success' : result.missed ? 'missed' : 'error';
+          item.status = result.stopped ? (fatalError ? 'error' : 'stopped') : result.ok ? 'success'
+            : result.missed ? 'missed' : result.successes.length ? 'partial' : 'error';
           item.error = result.error || (fatalError && run.error);
           item.limited = result.limited;
           if (result.error) log('ERROR', `${plan.name}：${result.error}`);

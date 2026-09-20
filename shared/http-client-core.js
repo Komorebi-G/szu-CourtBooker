@@ -1,5 +1,5 @@
 import { BASE_URL } from './constants.js';
-import { SessionExpiredError } from './errors.js';
+import { SessionExpiredError, RequestNotSentError } from './errors.js';
 export { SessionExpiredError } from './errors.js';
 
 function parseSetCookie(header) {
@@ -13,14 +13,18 @@ function parseSetCookie(header) {
     path: '/',
     expires: -1,
   };
+  let maxAge;
   for (const attribute of attributes) {
     const [rawName, ...rawValue] = attribute.trim().split('=');
     const name = rawName.toLowerCase();
     const value = rawValue.join('=');
     if (name === 'path') cookie.path = value;
     if (name === 'domain') cookie.domain = value.replace(/^\./, '');
-    if (name === 'expires') cookie.expires = Date.parse(value) / 1000;
+    if (name === 'expires' && Number.isFinite(Date.parse(value))) cookie.expires = Date.parse(value) / 1000;
+    if (name === 'max-age' && /^-?\d+$/.test(value) && Number.isFinite(Number(value))) maxAge = Number(value);
   }
+  // Max-Age takes precedence over Expires regardless of attribute order.
+  if (maxAge !== undefined) cookie.expires = Date.now() / 1000 + Math.max(0, maxAge);
   return cookie;
 }
 
@@ -43,7 +47,7 @@ export class CoreHttpClient {
         const domain = cookie.domain.replace(/^\./, '');
         const domainMatches = parsed.hostname === domain || parsed.hostname.endsWith(`.${domain}`);
         const pathMatches = parsed.pathname.startsWith(cookie.path || '/');
-        const alive = !cookie.expires || cookie.expires < 0 || cookie.expires > now;
+        const alive = cookie.expires == null || cookie.expires < 0 || cookie.expires > now;
         return domainMatches && pathMatches && alive;
       })
       .map((cookie) => `${cookie.name}=${cookie.value}`)
@@ -67,7 +71,11 @@ export class CoreHttpClient {
     }
   }
 
-  async request(path, { method = 'GET', form, expect = 'json', timeoutMs, deadlineMs } = {}) {
+  async request(path, { method = 'GET', form, expect = 'json', timeoutMs, deadlineMs, signal } = {}) {
+    // Check again at actual dispatch: a desktop request may have waited for
+    // another request to finish updating this account's cookies. In-flight
+    // responses still use only the timeout signal so Stop cannot hide success.
+    if (signal?.aborted) throw new RequestNotSentError('本次执行已停止，未发送请求');
     const url = new URL(path, BASE_URL);
     const headers = {
       accept: expect === 'json' ? '*/*' : 'text/html,application/xhtml+xml',
@@ -88,7 +96,7 @@ export class CoreHttpClient {
 
     const startedAt = Date.now();
     if (Number.isFinite(deadlineMs) && startedAt >= deadlineMs) {
-      const error = new Error('执行窗口已结束，未发送请求'); error.code = 'REQUEST_NOT_SENT'; throw error;
+      throw new RequestNotSentError('执行窗口已结束，未发送请求');
     }
     const response = await this.transport(url, {
       method,

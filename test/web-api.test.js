@@ -28,6 +28,11 @@ test('Web任务允许重叠/并发修改/非法参数/账号导入导出；不�
     courts: ['B', 'A'], courtLabels: { A: 'A场', B: 'B场' }, preferSameCourt: true,
     startAt: Date.now() + 60_000, intervalMs: 100, durationMs: 60000 };
   const saved = await request('/api/tasks', 'POST', body); assert.equal(saved.status, 201);
+  assert.equal(saved.data.config.tasks[0].startAt, undefined, '旧自定义定时不再用于执行');
+  const legacyStart = await request(`/api/tasks/${saved.data.taskId}/run`, 'POST', { mode: 'schedule', confirm: 'SUBMIT' });
+  assert.equal(legacyStart.status, 400); assert.match(legacyStart.data.error, /已移除系统定时/);
+  const earlyStart = await request(`/api/tasks/${saved.data.taskId}/run`, 'POST', { mode: 'release', confirm: 'SUBMIT' });
+  assert.equal(earlyStart.status, 400); assert.match(earlyStart.data.error, /放号当天/);
   assert.deepEqual(saved.data.config.tasks[0].courts, ['B', 'A']);
   assert.equal(saved.data.config.tasks[0].preferSameCourt, true);
   const before = await readFile(config, 'utf8');

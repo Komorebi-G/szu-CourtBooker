@@ -69,9 +69,9 @@
 
 <dialog id="confirmDialog"><div class="dialog-head"><h2>开始本次执行</h2><button class="icon-button" data-close="confirm" aria-label="关闭确认">×</button></div>
   <div class="dialog-body"><div id="confirmPlans"></div>
-    <label class="run-choice"><input type="radio" name="mode" value="release" checked><span>等待放号<small>现在联网检查，保持前台等待至预约日期前一天 12:30 才提交。</small></span></label>
+    <label class="run-choice"><input type="radio" name="mode" value="release" checked><span>等待放号<small>放号当天验证登录，保持前台等待至 12:30；到点再次核对登录后提交。</small></span></label>
     <label class="run-choice"><input type="radio" name="mode" value="now"><span>立即尝试<small>现在开始真实预约，按设置间隔继续捡漏。</small></span></label>
-    <p class="muted">不是后台定时任务；建议临近放号时打开执行。运行时自动保持亮屏，切后台或锁屏会中断，返回后需重新执行；已成功预约不会退订。支付请在学校完成。</p>
+    <p class="muted">不是后台定时任务；请在放号当天、临近放号时打开执行。运行时自动保持亮屏，切后台或锁屏会中断，返回后需重新执行；已成功预约不会退订。支付请在学校完成。</p>
     <p id="confirmError" class="form-error" role="alert"></p>
   </div><div class="dialog-actions"><button class="secondary" data-close="confirm">返回</button><button id="confirmStart" class="primary">确认并开始</button></div>
 </dialog>

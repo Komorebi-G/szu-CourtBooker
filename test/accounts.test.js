@@ -44,3 +44,13 @@ test('不接受其他网站Cookie、非法header和路径穿越', async () => {
   const accounts = new AccountStore({ dataDir: '/unused', legacySessionPath: '/unused' });
   assert.throws(() => accounts.sessionPath('../escape'), /编号无效/);
 });
+test('历史验证成功不能当成当前有效；复验失败后清除旧成功标记', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'szu-account-expiry-')); let expired = false;
+  const accounts = new AccountStore({ dataDir: dir, legacySessionPath: join(dir, 'session.json'),
+    verifyIdentity: async () => { if (expired) throw new Error('登录失效'); return { id: 'A', name: '测试' }; } });
+  await accounts.import('default', 'MOD_AUTH_CAS=A; _WEU=B');
+  assert.equal((await accounts.verify()).valid, true);
+  assert.equal((await accounts.summary()).valid, null);
+  expired = true; await assert.rejects(accounts.verify(), /登录失效/);
+  assert.equal((await accounts.summary()).verifiedAt, null);
+});

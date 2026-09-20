@@ -1,13 +1,13 @@
 // Windows-only executable probe from WSL. Uses isolated data and fake credentials;
-// the scheduled worker intentionally fails before accessing the school network.
+// the legacy entry only retires a fixture; no school requests or timer registration.
 import assert from 'node:assert/strict';
 import { mkdtemp, copyFile, readFile, mkdir } from 'node:fs/promises';
 import { join, win32 } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { windowsArgument, windowsRegistration } from '../desktop/src/native-scheduler.js';
-import { readJson, writeJson } from '../desktop/src/jobs.js';
+import { windowsArgument } from '../desktop/src/native-scheduler.js';
+import { readJson, writeJson, exists } from '../desktop/src/jobs.js';
 import { sleep } from '../shared/utils.js';
 
 const exec = promisify(execFile);
@@ -58,26 +58,18 @@ try {
   assert.equal((await api('/api/bootstrap')).accounts[0].exists, false, 'default account not overwritten');
   const data = join(dir, 'isolated data', 'data'), jobDir = join(data, 'jobs', id);
   await mkdir(jobDir, { recursive: true });
-  await writeJson(join(jobDir, 'job.json'), { id, taskId: 'packaged-probe', mode: 'check', releaseAt: Date.now(),
+  await writeJson(join(jobDir, 'job.json'), { id, taskId: 'packaged-probe', mode: 'schedule', releaseAt: Date.now(),
     sessionPath: win32.join(home, 'deliberately-missing-session.json'), createdAt: new Date().toISOString(),
     config: { scheduler: { timeoutMs: 60000 }, targets: [] } });
   await writeJson(join(jobDir, 'state.json'), { status: 'scheduled', logs: [], successes: [] });
-  await powershell(windowsRegistration({ id, at: Date.now() + 10_000, executable: exe,
-    args: ['--home', home, win32.join(diagnostics.appRoot, 'src', 'dispatcher.js'), win32.join(home, 'data')], cwd: winDir }));
   await api('/api/app/quit', 'POST', {});
   await sleep(1000);
   assert.equal(await powershell(`if (Get-Process -Id ${serverPid} -ErrorAction SilentlyContinue) { 'running' } else { 'exited' }`), 'exited');
   serverPid = null;
-  console.log('通过：多账号导入/导出；已退出管理服务，等待 Windows 定时唤起 exe。');
-  let state;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    state = await readJson(join(jobDir, 'state.json'));
-    if (state.finishedAt) break;
-    await sleep(500);
-  }
-  assert.equal(state.status, 'error'); assert.match(state.error, /deliberately-missing-session/);
-  assert.ok(state.logs.length > 0);
-  console.log(`通过：管理服务退出后，系统启动独立 exe → 执行器 → 日志落盘；未访问学校接口。\n测试资料：${dir}`);
+  await start([win32.join(diagnostics.appRoot, 'src', 'dispatcher.js'), win32.join(home, 'data')], true);
+  assert.equal(await exists(join(jobDir, 'stop')), true);
+  assert.equal(await exists(join(jobDir, 'schedule-retired')), true);
+  console.log(`通过：多账号导入导出、退出助手、旧定时入口停用；未访问学校接口。\n测试资料：${dir}`);
 } finally {
   await powershell(`if (Get-ScheduledTask -TaskName ${literal(taskName)} -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName ${literal(taskName)} -Confirm:$false }`);
   if (serverPid) await powershell(`Stop-Process -Id ${serverPid} -ErrorAction SilentlyContinue`);

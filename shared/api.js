@@ -1,11 +1,23 @@
+import { SessionExpiredError } from './errors.js';
+
+// Preserve the receiver of stateful API methods (especially identity). Prototype
+// wrappers split the cache between preflight and book(), allowing a second login.
+export function withBooking(api, book) {
+  return new Proxy(api, { get(target, property) {
+    if (property === 'book') return book;
+    const value = Reflect.get(target, property, target);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+}
+
 export class SzuVenueApi {
   constructor(client) {
     this.client = client;
     this.identity = null;
   }
 
-  async getIdentity() {
-    if (this.identity) return this.identity;
+  async getIdentity({ refresh = false } = {}) {
+    if (this.identity && !refresh) return this.identity;
     const { data: html } = await this.client.get('index.do', { expect: 'text' });
     const id = /\bUSERID='([^']+)'/.exec(html)?.[1];
     const infoText = /\bUSER_INFO=(\{.*?\});APP_TITLE=/.exec(html)?.[1];
@@ -13,9 +25,10 @@ export class SzuVenueApi {
     try {
       info = JSON.parse(infoText);
     } catch {
-      throw new Error('无法从预约首页解析用户信息，登录态可能不完整');
+      throw new SessionExpiredError('无法确认登录身份，请重新登录后手动启动本次执行');
     }
     if (!id || !info?.userName) throw new Error('预约首页没有有效的用户身份');
+    if (this.identity && this.identity.id !== id) throw new SessionExpiredError('登录身份已改变，请重新登录原账号后启动');
     this.identity = { id, name: info.userName };
     return this.identity;
   }
@@ -53,7 +66,7 @@ export class SzuVenueApi {
     return response.datas?.getOpeningRoom?.rows ?? [];
   }
 
-  async book({ date, modeCode, room, time, deadline }) {
+  async book({ date, modeCode, room, time, deadline, signal }) {
     const identity = await this.getIdentity();
     const [start, end] = time.split('-');
     const response = (await this.client.post('sportVenue/insertVenueBookingInfo.do', {
@@ -72,7 +85,7 @@ export class SzuVenueApi {
       YYKS: `${date} ${start}`,
       YYJS: `${date} ${end}`,
       PC_OR_PHONE: 'pc',
-    }, { deadlineMs: deadline })).data;
+    }, { deadlineMs: deadline, signal })).data;
     // HTTP success and valid JSON do not prove the school accepted or rejected a booking.
     if (!response || Array.isArray(response) || typeof response.code !== 'string' || !response.code.trim()) {
       throw new Error('预约接口未返回明确业务结果，结果待确认，请核对学校“我的预约”');

@@ -10,8 +10,10 @@ export class AccountStore {
   constructor({ dataDir, legacySessionPath, verifyIdentity }) {
     Object.assign(this, { dataDir, legacySessionPath });
     this.verifyIdentity = verifyIdentity ?? (async (session, path) => {
-      const client = new HttpClient(session, { sessionPath: path });
-      const identity = await new SzuVenueApi(client).getIdentity();
+      const client = path ? await HttpClient.create({ sessionPath: path }) : new HttpClient(session);
+      const api = new SzuVenueApi(client);
+      const identity = await api.getIdentity();
+      await api.getAvailableDates();
       if (path) await client.flush();
       return identity;
     });
@@ -34,7 +36,7 @@ export class AccountStore {
     const metadata = await this.metadata(id);
     const session = await loadSession(this.sessionPath(id)).catch(() => null);
     return { id, name: metadata.name, user: metadata.userName ?? null, userId: metadata.userId ?? null,
-      exists: Boolean(session), valid: session && metadata.verifiedAt ? true : null,
+      exists: Boolean(session), valid: null,
       verifiedAt: metadata.verifiedAt, savedAt: session?.savedAt, cookieCount: session?.cookies.length ?? 0 };
   }
   async list() {
@@ -66,11 +68,18 @@ export class AccountStore {
   async verify(id = 'default') {
     const metadata = await this.metadata(id);
     const path = this.sessionPath(id);
-    const identity = await this.verifyIdentity(await loadSession(path), path);
-    if (metadata.userId && metadata.userId !== identity.id) throw new Error('当前登录与任务账号不一致，请恢复该用户的登录状态');
+    let identity;
+    try {
+      identity = await this.verifyIdentity(await loadSession(path), path);
+      if (metadata.userId && metadata.userId !== identity.id) throw new Error('当前登录与任务账号不一致，请恢复该用户的登录状态');
+    }
+    catch (error) {
+      await this.setMetadata(id, { ...metadata, verifiedAt: null });
+      throw error;
+    }
     await this.setMetadata(id, { ...metadata, userId: identity.id, userName: identity.name,
       verifiedAt: new Date().toISOString() });
-    return this.summary(id);
+    return { ...await this.summary(id), valid: true };
   }
   async export(id = 'default') {
     const metadata = await this.metadata(id);

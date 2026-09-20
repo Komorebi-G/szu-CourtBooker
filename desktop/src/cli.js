@@ -36,7 +36,7 @@ function usage() {
   node src/cli.js orders [--limit 20]
   node src/cli.js cancel <预约记录WID>
 
-说明：run 只检查配置，不下单。正式预约请在 Web UI 安排，所有任务共用后台请求队列。`);
+说明：run 只检查配置，不下单。正式预约请在 Web UI 手动开始本次执行，所有任务共用请求队列。`);
 }
 
 async function createApi(sessionPath) {
@@ -96,7 +96,7 @@ async function catalogCommand({ configPath, sessionPath, dateValue }) {
 }
 
 async function runCommand({ configPath, sessionPath, dateValue, immediate, live }) {
-  if (live) throw new Error('正式预约请通过 Web UI 安排，避免绕过统一执行器产生重复请求');
+  if (live) throw new Error('正式预约请通过 Web UI 手动开始本次执行，避免绕过统一执行器产生重复请求');
   const config = await loadConfig(configPath);
   const { client, api } = await createApi(sessionPath);
   const identity = await api.getIdentity();

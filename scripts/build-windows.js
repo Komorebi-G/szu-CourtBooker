@@ -42,12 +42,12 @@ await writeFile(output, pe);
 await postject.inject(output, 'NODE_SEA_BLOB', await readFile(join(build, 'sea.blob')),
   { sentinelFuse: 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2' });
 pe = await readFile(output);
-// IMAGE_SUBSYSTEM_WINDOWS_GUI: management and scheduled execution have no console.
+// IMAGE_SUBSYSTEM_WINDOWS_GUI: the assistant has no console window.
 pe.writeUInt16LE(2, pe.readUInt32LE(0x3c) + 24 + 68);
 pe.writeUInt32LE(0, pe.readUInt32LE(0x3c) + 24 + 64);
 await writeFile(output, pe);
 const hash = createHash('sha256').update(pe).digest('hex');
 await writeFile(join(dist, 'SHA256SUMS.txt'), `${hash}  SZU-CourtBooker.exe\n`);
-await writeFile(join(dist, '使用说明.txt'), `深圳大学场馆预约助手\r\n\r\n双击 SZU-CourtBooker.exe，无需安装 Node.js、npm 或 Python。\r\n程序没有黑色终端，界面通过本机浏览器打开。关闭网页不会停止预约。\r\n账号、任务和日志保存在 %LOCALAPPDATA%\\SZUCourtBooker。\r\n在账号管理中添加用户，导入舍友的登录 JSON/cURL，任务选择对应用户。\r\n登录 JSON 包含账号登录权限，仅分享给可信的人。\r\n停止预约请在 UI 点击“停止并取消定时”；“退出管理服务”不停止预约。\r\n请将 exe 放在固定位置，再安排定时任务。尚未进行代码签名。\r\n本次打包不包含任何用户 Cookie、历史任务或日志。\r\n版本运行时：${version} · Windows x64\r\n`);
+await writeFile(join(dist, '使用说明.txt'), `深圳大学场馆预约助手\r\n\r\n双击 SZU-CourtBooker.exe，无需安装 Node.js、npm 或 Python。\r\n程序没有黑色终端，界面通过本机浏览器打开。关闭网页标签不会停止本次执行。\r\n账号、任务和日志保存在 %LOCALAPPDATA%\\SZUCourtBooker。\r\n在账号管理中添加用户，导入舍友的登录 JSON/cURL，任务选择对应用户。\r\n登录 JSON 包含账号登录权限，仅分享给可信的人。\r\n提前保存方案，放号当天重新登录或验证，再点击“开始本次执行”。Cookie 可能过期。\r\n停止单次预约请点击“停止本次执行”；“退出并停止执行”会停止全部预约。\r\n新版不注册系统定时，不自动补跑。执行期间保持助手运行、电脑醒着且联网。\r\n首次打开会停用当前数据目录的旧定时项；更新前请先停止旧版本的执行。尚未进行代码签名。\r\n本次打包不包含任何用户 Cookie、历史任务或日志。\r\n版本运行时：${version} · Windows x64\r\n`);
 console.log(`已生成 ${output} (${((await stat(output)).size / 1048576).toFixed(1)} MiB)`);
 console.log(`SHA256 ${hash}`);

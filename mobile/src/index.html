@@ -9,6 +9,7 @@
 <section id="plansPage">
   <div class="section-head"><div><p class="eyebrow">准备下一场运动</p><h1>预约方案</h1></div><button id="newPlan" class="primary">＋ 新建</button></div>
   <p class="explain">保存方案不会预约。执行时保持 App 打开，离开前台会中断。</p>
+  <p class="open-source-note">项目源码保存在 <a href="https://github.com/Komorebi-G/szu-CourtBooker">GitHub 私有仓库</a>，仅授权用户可查看。学校登录只在学校页面进行。</p>
   <div id="plans" class="task-list"></div>
   <div id="batchBar" class="batch-bar"><span id="selectedCount">未选择方案</span><button id="begin" class="primary">执行所选</button></div>
 </section>
@@ -18,7 +19,7 @@
 </section>
 <section id="accountsPage" hidden>
   <div class="section-head"><div><p class="eyebrow">每个方案独立选择</p><h1>账号</h1></div><button id="schoolLogin" class="primary">＋ 学校登录</button></div>
-  <p class="explain">直接在 App 内登录学校，自动获取并验证登录状态。也可导入舍友发送的 JSON / Cookie。</p>
+  <p class="explain">直接在 App 内登录学校，自动获取并验证登录状态。验证或执行前若场馆会话失效，会打开学校登录窗口尝试沿用本 App 的统一认证；统一认证失效时仍需手动登录。也可导入舍友发送的 JSON / Cookie。</p>
   <div class="field-actions"><button id="newAccount" class="secondary">导入 JSON / Cookie</button></div>
   <div id="accounts" class="task-list"></div>
 </section>
@@ -29,7 +30,7 @@
   <div class="dialog-head"><h2 id="planTitle">新建方案</h2><button type="button" class="icon-button" data-close="plan" aria-label="关闭方案">×</button></div>
   <div class="dialog-body">
     <div class="form-grid">
-      <label class="wide">名称<input id="planName" maxlength="60" required placeholder="例如：明天下午羽毛球"></label>
+      <label class="wide">名称（可不填，自动生成）<input id="planName" maxlength="60" placeholder="例如：明天下午羽毛球"></label>
       <label class="wide">执行账号<select id="planAccount" required></select></label>
       <label>项目<select id="planProject"></select></label><label>预约日期<select id="planDate"></select></label>
     </div>
@@ -62,7 +63,7 @@
 
 <dialog id="loginDialog"><div class="dialog-head"><h2 id="loginTitle">学校账号登录</h2><button class="icon-button" data-close="login" aria-label="关闭学校登录">×</button></div>
   <div class="dialog-body"><label>账号备注（可不填）<input id="loginName" maxlength="40" placeholder="默认使用学校姓名"></label>
-    <p id="loginHint" class="field-help">将打开学校登录页。每次清理登录窗口旧会话，不影响已保存的账号。完成登录后自动识别并验证，无需手动复制 Cookie。</p>
+    <p id="loginHint" class="field-help">将打开学校登录页并尝试使用本 App 登录窗口已有的学校会话；如需换号，可在学校窗口点击“换号 / 重试”。完成登录后自动识别并验证，无需手动复制 Cookie。</p>
     <p id="loginStatus" class="auth-progress" role="status"></p><p id="loginError" class="form-error" role="alert"></p>
   </div><div class="dialog-actions"><button class="secondary" data-close="login">取消</button><button id="openSchoolLogin" class="primary">打开学校登录</button></div>
 </dialog>

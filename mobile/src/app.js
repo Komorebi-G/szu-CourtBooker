@@ -7,6 +7,7 @@ import { PROJECTS } from '../../shared/projects.js';
 import { parseSessionText } from '../../shared/session-format.js';
 import { shanghaiDate, addDays, splitTimeSlot } from '../../shared/utils.js';
 import { bookingReleaseAt } from '../../shared/runner.js';
+import { SessionExpiredError } from '../../shared/errors.js';
 
 const $ = (s) => document.querySelector(s);
 const escape = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -127,8 +128,19 @@ function openLogin(id) {
   $('#loginTitle').textContent = account ? '重新登录 · ' + account.name : '学校账号登录';
   $('#loginName').value = account?.name ?? '';
   $('#loginHint').textContent = account?.userId ? `请登录 ${account.user || account.name} 的学校账号。验证成功才替换登录；取消或登录错账号不会改动原记录。`
-    : '将打开学校登录页。清理窗口旧会话不影响已保存的账号。进入场馆页面后自动获取 Cookie 并验证，无需手动复制。';
+    : '将打开学校登录页并尝试沿用本 App 登录窗口已有的学校会话；如需换号，请在学校窗口点击“换号 / 重试”。进入场馆页面后自动获取 Cookie 并验证。';
   $('#loginStatus').textContent = ''; $('#loginError').textContent = ''; $('#loginDialog').showModal();
+}
+async function verifyWithSchoolLogin(account) {
+  try { return await verifyAccount(store, device, account); }
+  catch (error) {
+    if (!(error instanceof SessionExpiredError) || !native) throw error;
+    toast('场馆登录已失效，正在尝试使用学校登录窗口恢复');
+    const captured = await device.login();
+    const updated = await saveSchoolLogin(store, captured, { accountId: account.id,
+      name: account.name, transport: nativeTransport(device) });
+    return { id: updated.userId, name: updated.user };
+  }
 }
 
 document.querySelectorAll('[data-tab]').forEach((el) => el.onclick = () => tab(el.dataset.tab));
@@ -137,6 +149,7 @@ $('#planDialog').addEventListener('close', () => catalogToken++);
 $('#newPlan').onclick = action(() => openPlan()); $('#newAccount').onclick = action(() => openAccount());
 $('#schoolLogin').onclick = action(() => openLogin());
 $('#loginDialog').addEventListener('cancel', (event) => { if (authBusy) event.preventDefault(); });
+$('#confirmDialog').addEventListener('cancel', (event) => { if (authBusy) event.preventDefault(); });
 $('#openSchoolLogin').onclick = action(async () => {
   editable(); const accountId = loginAccount; const name = $('#loginName').value.trim();
   authBusy = true; render(); $('#loginError').textContent = ''; $('#loginStatus').textContent = '请在学校窗口完成登录…';
@@ -200,7 +213,7 @@ $('#accounts').onclick = action(async (event) => {
   if (button.dataset.relogin) return openLogin(button.dataset.relogin);
   if (button.dataset.update) return openAccount(button.dataset.update);
   if (button.dataset.verify) { button.disabled = true;
-    try { const identity = await verifyAccount(store, device, store.state.accounts.find((a) => a.id === button.dataset.verify)); toast('验证成功：' + identity.name); render(); }
+    try { const identity = await verifyWithSchoolLogin(store.state.accounts.find((a) => a.id === button.dataset.verify)); toast('验证成功：' + identity.name); render(); }
     finally { button.disabled = false; } }
   if (button.dataset.remove) { const id = button.dataset.remove;
     if (store.state.plans.some((p) => p.accountId === id)) throw new Error('请先删除或修改使用此账号的方案');
@@ -226,11 +239,18 @@ $('#confirmStart').onclick = action(async () => {
   editable();
   if (!native) throw new Error('网页预览不能执行，请安装 APK');
   const plans = store.state.plans.filter((p) => selected.has(p.id)); const mode = document.querySelector('input[name=mode]:checked').value;
-  $('#confirmStart').disabled = true;
+  authBusy = true; $('#confirmDialog').querySelectorAll('button').forEach((button) => button.disabled = true); render();
   $('#toast').classList.remove('show');
-  const work = execution.start(plans, mode); $('#confirmDialog').close(); tab('results');
-  try { await work; } catch (error) { toast('执行未正常保存：' + error.message); }
-  finally { $('#confirmStart').disabled = false; render(); }
+  try {
+    for (const id of new Set(plans.map((plan) => plan.accountId))) {
+      const account = store.state.accounts.find((item) => item.id === id);
+      if (!account) throw new Error('方案账号已不存在');
+      await verifyWithSchoolLogin(account);
+    }
+    authBusy = false;
+    const work = execution.start(plans, mode); $('#confirmDialog').close(); tab('results');
+    try { await work; } catch (error) { toast('执行未正常保存：' + error.message); }
+  } finally { authBusy = false; $('#confirmDialog').querySelectorAll('button').forEach((button) => button.disabled = false); render(); }
 }, '#confirmError');
 $('#stop').onclick = () => execution.stop();
 $('#runs').onclick = action(async (event) => {

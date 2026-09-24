@@ -7,12 +7,53 @@ const { mkdirSync, existsSync, writeFileSync, renameSync, appendFileSync, readFi
 const { join, dirname } = require('node:path');
 const { homedir } = require('node:os');
 const { pathToFileURL } = require('node:url');
+const { spawn } = require('node:child_process');
 
 const args = process.argv.slice(2);
 const homeIndex = args.indexOf('--home');
 const requestedHome = homeIndex >= 0 ? args.splice(homeIndex, 2)[1] : null;
 const base = requestedHome || process.env.SZU_HOME || join(process.env.LOCALAPPDATA || homedir(), 'SZUCourtBooker');
 mkdirSync(base, { recursive: true });
+// The GUI executable has no console. Show immediate feedback while assets are
+// checked and the local server starts; close it after the browser is launched.
+function powershell(script) {
+  const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-STA', '-WindowStyle', 'Hidden',
+    '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+  { windowsHide: true, stdio: 'ignore' });
+  child.on('error', () => {});
+  child.unref();
+  return child;
+}
+const showSplash = process.platform === 'win32' && !args.includes('--diagnostics')
+  && !args.includes('--no-open') && !args.some((arg) => /(?:^|[\\/])(?:auth|open-login|dispatcher)\.js$/.test(arg));
+const splash = showSplash ? powershell([
+  'Add-Type -AssemblyName System.Windows.Forms',
+  'Add-Type -AssemblyName System.Drawing',
+  '$form = New-Object System.Windows.Forms.Form',
+  "$form.Text = '场馆预约助手'",
+  '$form.Size = [System.Drawing.Size]::new(370, 130)',
+  "$form.StartPosition = 'CenterScreen'",
+  '$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog',
+  '$form.MaximizeBox = $false',
+  '$form.TopMost = $true',
+  '$label = New-Object System.Windows.Forms.Label',
+  "$label.Text = '正在启动，稍后会自动打开浏览器…'",
+  '$label.AutoSize = $true',
+  '$label.Location = [System.Drawing.Point]::new(20, 18)',
+  '$form.Controls.Add($label)',
+  '$progress = New-Object System.Windows.Forms.ProgressBar',
+  '$progress.Location = [System.Drawing.Point]::new(20, 48)',
+  '$progress.Size = [System.Drawing.Size]::new(310, 18)',
+  "$progress.Style = 'Marquee'",
+  '$form.Controls.Add($progress)',
+  '$timer = New-Object System.Windows.Forms.Timer',
+  '$timer.Interval = 60000',
+  '$timer.Add_Tick({ $form.Close() })',
+  '$timer.Start()',
+  '[void]$form.ShowDialog()',
+].join('\n')) : null;
+function closeSplash() { if (splash && !splash.killed) splash.kill(); }
+if (splash) process.once('szu-ui-opened', closeSplash);
 async function main() {
   const compressed = Buffer.from(getAsset('application.gz'));
   const hash = createHash('sha256').update(compressed).digest('hex').slice(0, 16);
@@ -70,8 +111,14 @@ async function main() {
   process.argv = [process.execPath, entryPath, ...args];
   process.chdir(appRoot);
   await import(pathToFileURL(entryPath).href);
+  if (process.env.SZU_SERVER_REUSED === '1') closeSplash();
 }
 main().catch((error) => {
+  closeSplash();
   appendFileSync(join(base, 'startup.log'), `${new Date().toISOString()} ${error.stack}\n`);
+  if (showSplash) powershell([
+    'Add-Type -AssemblyName System.Windows.Forms',
+    `[void][System.Windows.Forms.MessageBox]::Show('启动失败。请查看 ${join(base, 'startup.log').replaceAll("'", "''")}', '场馆预约助手')`,
+  ].join('\n'));
   process.exitCode = 1;
 });

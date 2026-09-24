@@ -25,6 +25,12 @@ function fixture() {
   const runner = new ForegroundExecution({ store, device, createApi });
   return { runner, device, store, plan, calls, armed, createApi, saved: () => JSON.parse(saved) };
 }
+test('新建方案可留空名称，保存时生成可识别的默认名称', () => {
+  const { plan } = fixture();
+  const saved = validatePlan({ ...plan, name: '  ' });
+  assert.equal(saved.name, `${plan.date} 羽毛球 ${plan.times[0]}`);
+  assert.equal(plan.name, '羽毛球');
+});
 test('手机多账号前台执行：成功落盘、请求串行、结束释放亮屏', async () => {
   const f = fixture(); let inFlight = 0, max = 0;
   f.runner.createApi = async (...args) => { const c = await f.createApi(...args); const original = c.api.book;

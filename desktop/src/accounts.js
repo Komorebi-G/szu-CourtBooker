@@ -5,10 +5,11 @@ import { loadSession, parseSessionText, saveSession } from './session.js';
 import { exists, readJson, writeJson } from './jobs.js';
 import { HttpClient } from './http-client.js';
 import { SzuVenueApi } from '../../shared/api.js';
+import { SessionExpiredError } from '../../shared/errors.js';
 
 export class AccountStore {
-  constructor({ dataDir, legacySessionPath, verifyIdentity }) {
-    Object.assign(this, { dataDir, legacySessionPath });
+  constructor({ dataDir, legacySessionPath, verifyIdentity, renewSession }) {
+    Object.assign(this, { dataDir, legacySessionPath, renewSession });
     this.verifyIdentity = verifyIdentity ?? (async (session, path) => {
       const client = path ? await HttpClient.create({ sessionPath: path }) : new HttpClient(session);
       const api = new SzuVenueApi(client);
@@ -70,7 +71,16 @@ export class AccountStore {
     const path = this.sessionPath(id);
     let identity;
     try {
-      identity = await this.verifyIdentity(await loadSession(path), path);
+      try { identity = await this.verifyIdentity(await loadSession(path), path); }
+      catch (error) {
+        if (!(error instanceof SessionExpiredError) || !this.renewSession) throw error;
+        const renewed = await this.renewSession(metadata.userId);
+        if (metadata.userId && renewed.identity.id !== metadata.userId) {
+          throw new SessionExpiredError('浏览器统一认证的是另一个学校账号，原账号登录状态未改动');
+        }
+        await saveSession(renewed.session, path);
+        identity = renewed.identity;
+      }
       if (metadata.userId && metadata.userId !== identity.id) throw new Error('当前登录与任务账号不一致，请恢复该用户的登录状态');
     }
     catch (error) {

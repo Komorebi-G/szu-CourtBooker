@@ -18,6 +18,7 @@ import { JobStore, JOB_ACTIVE } from './jobs.js';
 import { NativeScheduler } from './native-scheduler.js';
 import { loadSession } from './session.js';
 import { AccountStore } from './accounts.js';
+import { renewVenueSessionFromBrowser } from './browser-renew.js';
 import { managerIdentity, startManagerServer } from './manager-server.js';
 import { addDays, resolveDate, shanghaiDate, splitTimeSlot } from '../../shared/utils.js';
 
@@ -41,11 +42,12 @@ const shouldOpen = !args.includes('--no-open');
 const authState = { status: 'idle', logs: [], startedAt: null, finishedAt: null };
 const scheduler = new NativeScheduler();
 const dataDir = resolve(process.env.SZU_DATA || join(root, '.data'));
-const execution = new LiveExecution({ dataDir });
+const renewSession = (expectedUserId) => renewVenueSessionFromBrowser({ expectedUserId });
+const execution = new LiveExecution({ dataDir, renewSession });
 const jobs = new JobStore({ sessionPath, scheduler, execution, startJob: (dir) => { execution.start(dir); },
   dataDir });
 let legacyCleanup = Promise.resolve([]);
-const accounts = new AccountStore({ dataDir: jobs.dataDir, legacySessionPath: sessionPath });
+const accounts = new AccountStore({ dataDir: jobs.dataDir, legacySessionPath: sessionPath, renewSession });
 let authChild = null;
 // Fail at startup with a useful diagnostic rather than serving a blank 404 page.
 for (const name of ['index.html', 'app.js', 'styles.css']) {
@@ -459,6 +461,7 @@ async function serveStatic(response, url) {
       'cache-control': 'no-cache',
     });
     response.end(content);
+    if (pathname === '/index.html') process.emit('szu-ui-opened');
   } catch {
     json(response, 404, { ok: false, error: '页面不存在' });
   }
@@ -500,7 +503,8 @@ function openBrowser(url) {
     return;
   }
   if (process.platform === 'win32') {
-    const child = spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true });
+    const helper = join(root, 'scripts', 'open-login.js');
+    const child = spawn(process.execPath, [helper, url], { detached: true, stdio: 'ignore', windowsHide: true });
     child.on('error', (error) => console.error(`浏览器未打开：${error.message}`));
     child.unref();
     return;
@@ -513,6 +517,7 @@ function openBrowser(url) {
 
 try {
   const { url, reused } = await startManagerServer(server, { port, host, identity });
+  process.env.SZU_SERVER_REUSED = reused ? '1' : '0';
   console.log(`场馆预约助手${reused ? '已在运行' : '已启动'}：${url}`);
   if (!reused) {
     console.log('Cookie 和配置只保存在本机。按 Ctrl+C 停止。');

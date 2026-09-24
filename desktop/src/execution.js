@@ -26,10 +26,13 @@ export class LiveExecution {
   quota = new BookingQuota();
   closing = false;
   failures = new Map();
-  constructor({ dataDir, createApi = async (path) => {
-    const client = await HttpClient.create({ sessionPath: path });
-    return { client, api: new SzuVenueApi(client) };
-  } } = {}) { this.createApi = createApi; this.dataDir = dataDir; }
+  constructor({ dataDir, createApi, renewSession } = {}) {
+    this.createApi = createApi ?? (async (path, _signal, expectedUserId) => {
+      const client = await HttpClient.create({ sessionPath: path, expectedUserId, renewSession });
+      return { client, api: new SzuVenueApi(client) };
+    });
+    this.dataDir = dataDir;
+  }
   claim() {
     if (!this.dataDir || this.lockToken) return;
     // Also respects the old dispatcher's lock until its in-flight work ends.

@@ -7,16 +7,17 @@ import { withBooking } from '../../shared/api.js';
 import { shanghaiDate, addDays, splitTimeSlot, resolveDate } from '../../shared/utils.js';
 
 export function validatePlan(plan) {
-  if (!PROJECTS.some((p) => p.id === plan.project)) throw new Error('请选择体育项目');
+  const project = PROJECTS.find((p) => p.id === plan.project);
+  if (!project) throw new Error('请选择体育项目');
   resolveDate(plan.date);
   if (plan.date < shanghaiDate() || plan.date > addDays(shanghaiDate(), 7)) throw new Error('日期须为今天至未来第七天');
-  if (!plan.accountId || !plan.name?.trim()) throw new Error('请选择账号并填写方案名称');
+  if (!plan.accountId) throw new Error('请选择账号');
   if (!Array.isArray(plan.times) || !plan.times.length) throw new Error('至少选择一个时段');
   plan.times.forEach(splitTimeSlot);
   if (!Array.isArray(plan.courts) || !plan.courts.length || plan.courts.some((c) => typeof c !== 'string' || !c.trim())) throw new Error('至少选择一个场地');
   if (!Number.isFinite(plan.intervalMs) || plan.intervalMs < 100 || plan.intervalMs > 3600000) throw new Error('间隔须为 0.1 至 3600 秒');
   if (!Number.isFinite(plan.durationMs) || plan.durationMs < 1000 || plan.durationMs > 86400000) throw new Error('最长持续时间须为 1 秒至 24 小时');
-  return plan;
+  return { ...plan, name: plan.name?.trim() || `${plan.date} ${project.label} ${plan.times[0]}` };
 }
 export function targetFor(plan) {
   const project = PROJECTS.find((p) => p.id === plan.project);

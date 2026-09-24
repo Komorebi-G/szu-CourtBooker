@@ -21,7 +21,7 @@ try {
   assert.equal(await page.locator('#interval').inputValue(), '0.1');
   await page.getByRole('button', { name: '关闭方案' }).click(); assert.equal(await page.locator('#planDialog').evaluate((el) => el.open), false);
   await page.locator('#newPlan').click(); await page.locator('#planProject').selectOption('volleyball');
-  await page.locator('#planName').fill('明晚排球');
+  assert.equal(await page.locator('#planName').inputValue(), '');
   await page.locator('[data-time="19:00-20:00"]').click(); await page.locator('[data-time="20:00-21:00"]').click();
   await page.locator('[data-court="B"]').click(); await page.locator('[data-court="A"]').click();
   assert.equal(await page.locator('[data-court="B"] .court-order').textContent(), '1');
@@ -31,7 +31,9 @@ try {
   await page.getByRole('button', { name: '保存方案', exact: true }).click();
   const state = await page.evaluate(() => JSON.parse(localStorage.getItem('szu-mobile-v1')));
   assert.equal(state.plans.length, 1); assert.equal(state.runs.length, 0);
+  assert.match(state.plans[0].name, /排球 19:00-20:00/);
   assert.deepEqual(state.plans[0].courts, ['B', 'A']);
+  assert.equal(await page.locator('.open-source-note a').getAttribute('href'), 'https://github.com/Komorebi-G/szu-CourtBooker');
   await page.locator('#begin').click(); await page.locator('input[value="now"]').check();
   assert.match(await page.locator('#confirmPlans').textContent(), /界面测试账号/);
   await page.locator('#confirmStart').click(); await page.getByText('网页预览不能执行，请安装 APK', { exact: true }).waitFor();

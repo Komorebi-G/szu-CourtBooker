@@ -65,7 +65,7 @@ export async function loadSession(path = DEFAULT_SESSION_FILE) {
 }
 
 export async function importSessionFromCdp(path = DEFAULT_SESSION_FILE) {
-  const browser = await chromium.connectOverCDP('http://127.0.0.1:9334');
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${process.platform === 'win32' ? 9335 : 9334}`);
   try {
     const context = browser.contexts()[0];
     if (!context) throw new Error('浏览器中没有可用的上下文');

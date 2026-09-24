@@ -8,7 +8,7 @@
 
 ### Windows 单文件版（推荐日常使用）
 
-双击 `dist/SZU-CourtBooker.exe`，无需安装 Node.js、npm、Python 或项目依赖。程序内置运行时，约 93 MiB；首次运行自动解压应用缓存，管理页面在本机浏览器打开。exe 使用 Windows GUI 子系统，后台预约不弹黑色终端。
+双击 `dist/SZU-CourtBooker.exe`，无需安装 Node.js、npm、Python 或项目依赖。程序内置运行时，约 93 MiB；首次运行自动解压应用缓存，期间显示启动提示，管理页面随后在预约助手专用浏览器配置中打开，默认优先 Edge。这个配置也用于学校登录，与日常浏览器配置分开。exe 使用 Windows GUI 子系统，后台预约不弹黑色终端。
 
 请先把 exe 放在 Windows 本地盘的固定位置，再保存方案。账号、配置、任务和日志保存在 `%LOCALAPPDATA%\SZUCourtBooker`，不在 exe 旁边。包内不包含你的 Cookie 或已有任务。旧版用户可在账号管理导出登录 JSON，然后在 exe 版导入；原任务仍在旧数据目录，不会自动迁移或重复安排。构建尚未代码签名。
 

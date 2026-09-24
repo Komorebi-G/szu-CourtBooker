@@ -3,7 +3,15 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
-const url = 'https://ehall.szu.edu.cn/qljfwapp/sys/lwSzuCgyy/index.do#/sportVenue';
+const loginUrl = 'https://ehall.szu.edu.cn/qljfwapp/sys/lwSzuCgyy/index.do#/sportVenue';
+const localUrl = process.argv[2];
+if (localUrl) {
+  const parsed = new URL(localUrl);
+  if (parsed.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname)) {
+    throw new Error('管理页面地址只能是本机 HTTP 地址');
+  }
+}
+const url = localUrl || loginUrl;
 const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex');
 const edgeScript = join(codexHome, 'skills', 'wsl-windows-edge', 'scripts', 'edge.mjs');
 
@@ -26,11 +34,11 @@ function waitForChild(child) {
   });
 }
 
-async function launchExecutable(executable, profile) {
+async function launchExecutable(executable, profile, port = 9334) {
   await mkdir(profile, { recursive: true });
   console.log(`使用浏览器：${basename(executable)}`);
   const child = spawn(executable, [
-    '--remote-debugging-port=9334',
+    `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     '--no-first-run',
     '--no-default-browser-check',
@@ -68,13 +76,13 @@ async function launchOnWindows() {
   };
   const order = preference && candidates[preference]
     ? [preference, ...Object.keys(candidates).filter((name) => name !== preference)]
-    : ['chrome', 'edge', 'brave', 'chromium'];
+    : ['edge', 'chrome', 'brave', 'chromium'];
   const custom = process.env.SZU_BROWSER_PATH;
   const executable = custom && await exists(custom)
     ? custom
     : await firstExisting(order.flatMap((name) => candidates[name]));
   if (!executable) throw new Error('找不到 Chrome、Edge、Brave 或 Chromium');
-  await launchExecutable(executable, join(local, 'SZUCourtBooker', 'browser-profile'));
+  await launchExecutable(executable, join(local, 'SZUCourtBooker', 'browser-profile-edge'), 9335);
 }
 
 async function launchOnMac() {
@@ -87,7 +95,7 @@ async function launchOnMac() {
   };
   const order = preference && candidates[preference]
     ? [preference, ...Object.keys(candidates).filter((name) => name !== preference)]
-    : ['chrome', 'edge', 'brave', 'chromium'];
+    : ['edge', 'chrome', 'brave', 'chromium'];
   const custom = process.env.SZU_BROWSER_PATH;
   const executable = custom && await exists(custom)
     ? custom
@@ -100,7 +108,7 @@ async function launchOnLinux() {
   const custom = process.env.SZU_BROWSER_PATH;
   let executable = custom && await exists(custom) ? custom : null;
   if (!executable) {
-    const names = ['google-chrome', 'microsoft-edge', 'brave-browser', 'chromium', 'chromium-browser'];
+    const names = ['microsoft-edge', 'google-chrome', 'brave-browser', 'chromium', 'chromium-browser'];
     for (const name of names) {
       const result = spawnSync('which', [name], { encoding: 'utf8' });
       if (result.status === 0) {
@@ -121,7 +129,7 @@ async function launchWindowsBrowserFromWsl() {
     `$custom = '${custom}'`,
     "$roots = @($env:LOCALAPPDATA, $env:ProgramFiles, [Environment]::GetFolderPath('ProgramFilesX86'))",
     "$map = @{ chrome = 'Google\\Chrome\\Application\\chrome.exe'; edge = 'Microsoft\\Edge\\Application\\msedge.exe'; brave = 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'; chromium = 'Chromium\\Application\\chrome.exe' }",
-    "$order = @('chrome','edge','brave','chromium')",
+    "$order = @('edge','chrome','brave','chromium')",
     "if ($preferred -and $map.ContainsKey($preferred)) { $order = @($preferred) + @($order | Where-Object { $_ -ne $preferred }) }",
     '$browser = $null',
     "if ($custom -and (Test-Path $custom)) { $browser = $custom }",

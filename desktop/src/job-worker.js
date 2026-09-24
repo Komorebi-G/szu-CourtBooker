@@ -80,7 +80,7 @@ async function executeOwnedJob(dir, { quota, manualStart = false, stopSignal,
       state.error = '自动定时与中断补跑已停用，请验证登录后手动开始新的执行';
       return;
     }
-    const { client, api } = await createApi(job.sessionPath, signal);
+    const { client, api } = await createApi(job.sessionPath, signal, job.accountIdentityId);
     const identity = await api.getIdentity();
     if (job.accountIdentityId && identity.id !== job.accountIdentityId) throw new Error('登录身份与安排时选择的用户不一致，已停止预约');
     log('INFO', `使用账号：${job.accountName ?? '我的账号'}${identity?.name ? `（${identity.name}）` : ''}`);

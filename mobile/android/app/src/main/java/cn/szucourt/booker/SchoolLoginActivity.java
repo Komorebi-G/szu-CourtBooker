@@ -101,7 +101,8 @@ public class SchoolLoginActivity extends AppCompatActivity {
                 if (browser.canGoBack()) browser.goBack(); else finish();
             }
         });
-        startFresh();
+        status.setText("正在打开学校页面；如需切换账号，请点击“换号 / 重试”。");
+        browser.loadUrl(APP_URL);
     }
 
     private static boolean trusted(Uri uri) {
@@ -150,6 +151,7 @@ public class SchoolLoginActivity extends AppCompatActivity {
             return;
         }
         if (cookie.length() > 64000) { status.setText("登录信息异常过长，请换号重试。"); return; }
+        CookieManager.getInstance().flush();
         completed = true; handler.removeCallbacks(poll);
         Intent data = new Intent(); data.putExtra("cookie", cookie);
         data.putExtra("userAgent", browser.getSettings().getUserAgentString());

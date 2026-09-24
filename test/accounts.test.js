@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AccountStore } from '../desktop/src/accounts.js';
 import { loadSession, parseSessionText } from '../desktop/src/session.js';
+import { SessionExpiredError } from '../shared/errors.js';
 
 test('多用户登录隔离，JSON导出导入无损，摘要不会暴露Cookie', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'szu-account-test-'));
@@ -53,4 +54,22 @@ test('历史验证成功不能当成当前有效；复验失败后清除旧成�
   assert.equal((await accounts.summary()).valid, null);
   expired = true; await assert.rejects(accounts.verify(), /登录失效/);
   assert.equal((await accounts.summary()).verifiedAt, null);
+});
+test('场馆会话失效时可用统一认证恢复，身份不符则保留原登录', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'szu-account-sso-'));
+  const accounts = new AccountStore({ dataDir: dir, legacySessionPath: join(dir, 'session.json'),
+    verifyIdentity: async (session) => {
+      if (session.cookies[0].value === 'old') throw new SessionExpiredError('场馆会话失效');
+      return { id: session.cookies[0].value, name: '测试' };
+    },
+    renewSession: async () => ({ session: parseSessionText('MOD_AUTH_CAS=B; _WEU=new'), identity: { id: 'B', name: '另一个账号' } }),
+  });
+  await accounts.import('default', 'MOD_AUTH_CAS=old; _WEU=old');
+  await accounts.setMetadata('default', { name: '原账号', userId: 'A' });
+  const before = await readFile(accounts.sessionPath(), 'utf8');
+  await assert.rejects(accounts.verify(), /另一个学校账号/);
+  assert.equal(await readFile(accounts.sessionPath(), 'utf8'), before);
+  accounts.renewSession = async () => ({ session: parseSessionText('MOD_AUTH_CAS=A; _WEU=new'), identity: { id: 'A', name: '原账号' } });
+  assert.equal((await accounts.verify()).valid, true);
+  assert.equal((await loadSession(accounts.sessionPath())).cookies[0].value, 'A');
 });

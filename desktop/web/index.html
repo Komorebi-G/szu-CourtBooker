@@ -9,6 +9,7 @@
   <header class="topbar"><a class="brand" href="/" aria-label="场馆预约助手首页"><span class="brand-mark">场</span><strong>场馆预约助手</strong></a><button id="sessionButton" class="secondary">登录状态</button></header>
   <main class="page">
     <div class="page-heading"><div><p class="eyebrow">SZU · 粤海校区</p><h1>预约方案</h1><p class="muted">提前保存方案，放号当天登录并开始本次执行。明天的场，今天 12:30 开抢。</p></div><button id="addTaskButton" class="primary">＋ 新建方案</button></div>
+    <p class="open-source-note">项目源码保存在 <a href="https://github.com/Komorebi-G/szu-CourtBooker" target="_blank" rel="noopener noreferrer">GitHub 私有仓库</a>，仅授权用户可查看。登录请确认地址属于学校官方域名。</p>
     <div id="connectionError" class="notice error" role="alert" hidden></div>
     <div id="recordError" class="notice error" role="alert" hidden></div>
     <section class="schedule-note"><span class="status-dot"></span><div><strong>先验证登录，再启动本次倒计时</strong><p id="schedulerHint">方案不会自动启动；请在放号当天打开助手。</p></div><span class="count" id="planCount"></span></section>
@@ -42,7 +43,7 @@
     <div class="dialog-body">
       <label>当前管理的用户<select id="authAccount"></select></label><p id="accountSummary" class="field-help"></p>
       <details><summary>新增用户</summary><div class="new-account-row"><input id="accountName" placeholder="备注，例如：舍友小王" maxlength="40" aria-label="用户备注"><button id="addAccountButton" class="secondary">添加用户</button></div></details>
-      <p class="field-help">可以在本机登录，也可以导入舍友分享的登录文件。Cookie 可能失效。请在放号当天登录或导入，启动时会重新检查身份。</p>
+      <p class="field-help">可以在本机登录，也可以导入舍友分享的登录文件。助手界面和学校登录页共用专用浏览器配置，优先打开 Edge；它与日常 Edge 窗口分开。场馆 Cookie 失效时，会尝试使用专用浏览器里仍有效的学校统一认证自动恢复；统一认证失效仍需重新登录。请在放号当天验证。</p>
       <button id="startAuthButton" class="primary full">打开浏览器登录此用户</button>
       <details class="auth-import" open><summary>导入 JSON / cURL / Cookie</summary>
         <label class="file-label">选择登录文件<input id="loginFile" type="file" accept=".json,.txt"></label>

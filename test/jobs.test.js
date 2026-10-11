@@ -10,6 +10,8 @@ import { runDispatcher } from '../desktop/src/dispatcher.js';
 import { LiveExecution, BookingQueue } from '../desktop/src/execution.js';
 import { shanghaiDate, addDays, sleep } from '../shared/utils.js';
 import { windowsArgument } from '../desktop/src/native-scheduler.js';
+import { processOwner, matchesProcessOwner } from '../desktop/src/process-owner.js';
+import { spawn } from 'node:child_process';
 
 const metadata = { campusList: [{ XQDM: '1', XQDM_DISPLAY: '粤海校区' }],
   xmList: [{ XQDM: '1', XMDM: '001', XMMC: '羽毛球', DCFS: '1.0' }],
@@ -18,7 +20,7 @@ async function fixture(mode = 'now') {
   const dataDir = await mkdtemp(join(tmpdir(), 'szu-job-test-'));
   const id = randomUUID(), dir = join(dataDir, 'jobs', id);
   await mkdir(dir, { recursive: true });
-  const target = { id: 'task-1', name: '测试', project: 'badminton', enabled: true, date: '2026-09-20',
+  const target = { id: 'task-1', name: '测试', project: 'badminton', enabled: true, date: addDays(shanghaiDate(), 1),
     campus: '粤海校区', sport: '羽毛球', mode: '包场', venues: ['东馆'], times: ['19:00-20:00'], courts: ['A'] };
   const job = { id, taskId: target.id, mode, releaseAt: Date.now(), sessionPath: 'unused', createdAt: new Date().toISOString(),
     config: { targets: [target], scheduler: { timeoutMs: 500, queryConcurrency: 1, pollIntervalMs: 10, pollJitterMs: 0 }, booking: { taskConcurrency: 2 } } };
@@ -26,6 +28,7 @@ async function fixture(mode = 'now') {
   await writeJson(join(dir, 'state.json'), { status: 'scheduled', logs: [], successes: [] });
   let calls = 0;
   const api = { async getIdentity() {}, async sampleServerOffset() { return 0; }, async getAvailableDates() {}, async getSportVenueData() { return metadata; },
+    async getAllBookings() { return []; },
     async getOpeningRooms() { return [{ WID: 'A', CDMC: 'A', CGBM: 'v' }]; },
     async book() { calls++; return { code: '0', data: { DHID: 'order-1' } }; } };
   const createApi = async () => ({ api, client: { async flush() {} } });
@@ -84,7 +87,7 @@ test('同一数据目录的不同助手不能各自发送；当前执行结束�
   const first = new LiveExecution({ dataDir: f.dataDir, createApi: f.createApi });
   const second = new LiveExecution({ dataDir: f.dataDir, createApi: f.createApi });
   const work = first.start(f.dir);
-  assert.equal(Number(await readFile(join(f.dataDir, 'dispatcher.lock'), 'utf8')), process.pid);
+  assert.equal(Number((await readFile(join(f.dataDir, 'dispatcher.lock'), 'utf8')).split('\n')[0]), process.pid);
   assert.throws(() => second.start(f.dir), /另一个助手实例/);
   await first.close(); await work;
   assert.equal(await exists(join(f.dataDir, 'dispatcher.lock')), false);
@@ -198,6 +201,129 @@ test('桌面并发任务同账号项目合计两个时段后正常完成', async
   const live = new LiveExecution({ createApi: f.createApi });
   await Promise.all([live.start(f.dir), live.start(dir2)]);
   const states = await Promise.all([f.store.get(f.id), f.store.get(id2)]);
-  assert.equal(f.calls(), 2); assert.ok(states.every((s) => s.status === 'success'));
+  assert.equal(f.calls(), 2); assert.ok(states.every((s) => ['success', 'partial', 'limited'].includes(s.status)));
+  assert.equal(states.reduce((count, s) => count + s.successes.length, 0), 2);
   assert.ok(states.some((s) => s.limited));
+});
+
+test('进程编号仍存活但启动身份不符时，历史状态和锁均按中断处理', async () => {
+  const f = await fixture();
+  await writeJson(join(f.dir, 'state.json'), { status: 'booking', pid: process.pid,
+    processIdentity: `${processOwner.identity}-old`, logs: [], successes: [] });
+  assert.equal((await f.store.get(f.id)).status, 'interrupted');
+  await writeFile(join(f.dataDir, 'dispatcher.lock'), `${process.pid}\n${processOwner.identity}-old\nstale`);
+  await writeFile(join(f.dir, 'run.lock'), `${process.pid}\n${processOwner.identity}-old\nstale`);
+  const live = new LiveExecution({ dataDir: f.dataDir, createApi: f.createApi });
+  await live.start(f.dir);
+  assert.equal(f.calls(), 1);
+  assert.equal(await exists(join(f.dataDir, 'dispatcher.lock')), false);
+});
+
+test('首单意图预写后进程崩溃，发送标记使核对仍能识别未知提交', async () => {
+  const f = await fixture();
+  const requestId = '2026-10-12|19:00-20:00';
+  const prepared = { date: '2026-10-12', time: '19:00-20:00', preparedAt: new Date().toISOString(), room: { WID: 'A' } };
+  await writeJson(join(f.dir, 'state.json'), { status: 'booking', pid: 99999999, logs: [], successes: [],
+    pendingRequests: { [requestId]: prepared } });
+  await writeJson(join(f.dir, 'dispatch.json'), { pendingRequests: { [requestId]: { ...prepared, sentAt: new Date().toISOString() } } });
+  assert.ok((await f.store.get(f.id)).pendingRequests[requestId].sentAt);
+  const summary = (await f.store.list({ summary: true }))[0];
+  assert.ok(summary.pendingRequests[requestId].sentAt);
+  await f.store.recordReview(f.id, { resolvedRequests: [{ requestId, outcome: 'school_order_matched' }], reviewedOutcome: 'success' });
+  const state = await f.store.get(f.id);
+  assert.deepEqual(state.pendingRequests, {}); assert.equal(state.status, 'success');
+  assert.ok(state.reviewedRequests[requestId].sentAt);
+  assert.equal(await exists(join(f.dir, 'dispatch.json')), false);
+});
+
+test('历史轮询摘要省略大日志并复用未变化记录，状态变更会刷新缓存', async (t) => {
+  const f = await fixture();
+  await writeJson(join(f.dir, 'state.json'), { status: 'success', successes: [{ orderId: 'known' }],
+    logs: Array.from({ length: 500 }, (_, index) => ({ message: `event ${index}`, details: { payload: 'x'.repeat(1000) } })),
+    diagnostics: { events: ['x'.repeat(1000)] } });
+  const first = (await f.store.list({ summary: true }))[0];
+  assert.equal(first.logs, undefined); assert.equal(first.diagnostics, undefined); assert.equal(first.logCount, 500);
+  assert.ok(JSON.stringify(first).length < 2000);
+  const parse = t.mock.method(JSON, 'parse');
+  await f.store.list({ summary: true });
+  assert.equal(parse.mock.callCount(), 0, '未变化的历史不应每次读取解析完整日志');
+  await writeJson(join(f.dir, 'state.json'), { status: 'partial', successes: [{ orderId: 'known' }], logs: [] });
+  assert.equal((await f.store.list({ summary: true }))[0].status, 'partial');
+  assert.ok(parse.mock.callCount() >= 2);
+});
+
+test('未知预约不能靠删除历史隐藏，确认核对后可删除', async () => {
+  const f = await fixture(), requestId = '2026-10-12|19:00-20:00';
+  await writeJson(join(f.dir, 'state.json'), { status: 'error', logs: [], successes: [], pendingRequests: {
+    [requestId]: { date: '2026-10-12', time: '19:00-20:00', sentAt: new Date().toISOString() } } });
+  await assert.rejects(f.store.remove(f.id), /待确认.*核对/);
+  assert.equal(await exists(join(f.dir, 'state.json')), true);
+  await f.store.recordReview(f.id, { resolvedRequests: [{ requestId, outcome: 'confirmed_no_order' }] });
+  await f.store.remove(f.id);
+  assert.equal(await exists(f.dir), false);
+});
+
+test('损坏状态仍保留账号和日期，明确核对恢复前不能删除；恢复保存原文件', async () => {
+  const f = await fixture();
+  f.job.accountIdentityId = 'school-account-A'; await writeJson(join(f.dir, 'job.json'), f.job);
+  const original = '{"status":"booking",'; await writeFile(join(f.dir, 'state.json'), original);
+  const corrupt = await f.store.inspect(f.id);
+  assert.equal(corrupt.requiresReview, true); assert.equal(corrupt.accountIdentityId, 'school-account-A');
+  assert.equal(corrupt.target.date, f.job.config.targets[0].date);
+  await assert.rejects(f.store.remove(f.id), /损坏.*核对/);
+  await f.store.recordReview(f.id, { acknowledgeCorrupt: true });
+  const restored = await f.store.get(f.id);
+  assert.equal(restored.requiresReview, false); assert.equal(restored.successes.length, 0);
+  assert.equal(await readFile(join(f.dir, restored.recovery.preservedFiles[0]), 'utf8'), original);
+});
+
+test('旧 Windows PID 记录通过实际命令和创建时间识别进程复用', () => {
+  const owner = { pid: 42, startedAt: '2026-10-11T10:00:00Z' };
+  assert.equal(matchesProcessOwner(owner, { commandLine: 'node.exe unrelated.js', createdAt: '2026-10-11T09:00:00Z' }), false);
+  assert.equal(matchesProcessOwner(owner, { commandLine: 'C:\\apps\\SZU-CourtBooker.exe', createdAt: '2026-10-11T11:00:00Z' }), false);
+  assert.equal(matchesProcessOwner(owner, { commandLine: 'C:\\apps\\SZU-CourtBooker.exe', createdAt: '2026-10-11T09:00:00Z' }), true);
+});
+
+test('旧 PID-only 记录被无关真实进程复用时，不应卡住停止和执行锁', async (t) => {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  t.after(() => child.kill());
+  const f = await fixture();
+  await writeJson(join(f.dir, 'state.json'), { status: 'booking', pid: child.pid, logs: [], successes: [] });
+  assert.equal((await f.store.get(f.id)).status, 'interrupted');
+  await writeFile(join(f.dataDir, 'dispatcher.lock'), String(child.pid));
+  await writeFile(join(f.dir, 'run.lock'), String(child.pid));
+  const live = new LiveExecution({ dataDir: f.dataDir, createApi: f.createApi });
+  await live.start(f.dir);
+  assert.equal(f.calls(), 1); process.kill(child.pid, 0);
+});
+
+test('核对状态已保存但发送标记尚未清除时，摘要不能重新显示已核实请求', async () => {
+  const f = await fixture(), requestId = '2026-10-12|19:00-20:00';
+  const intent = { date: '2026-10-12', time: '19:00-20:00', sentAt: new Date().toISOString() };
+  await writeJson(join(f.dir, 'state.json'), { status: 'error', logs: [], successes: [], pendingRequests: {},
+    reviewedRequests: { [requestId]: { ...intent, checkedAt: new Date().toISOString() } } });
+  await writeJson(join(f.dir, 'dispatch.json'), { pendingRequests: { [requestId]: intent } });
+  assert.deepEqual((await f.store.get(f.id)).pendingRequests, {});
+  assert.deepEqual((await f.store.list({ summary: true }))[0].pendingRequests, {});
+});
+
+test('明确业务响应已保存而发送标记残留时不误报未知，后续不同尝试仍保留', async () => {
+  for (const code of ['0', '1']) {
+    const f = await fixture(), key = '2026-10-12|19:00-20:00', attemptId = randomUUID();
+    const intent = { attemptId, date: '2026-10-12', time: '19:00-20:00', sentAt: new Date().toISOString() };
+    await writeJson(join(f.dir, 'state.json'), { status: 'error', logs: [], successes: [], pendingRequests: {},
+      completedRequests: { [key]: { attemptId, code, message: code === '1' ? '已满' : undefined } } });
+    await writeJson(join(f.dir, 'dispatch.json'), { pendingRequests: { [key]: intent } });
+    assert.deepEqual((await f.store.get(f.id)).pendingRequests, {});
+    assert.deepEqual((await f.store.list({ summary: true }))[0].pendingRequests, {});
+    await writeJson(join(f.dir, 'dispatch.json'), { pendingRequests: { [key]: { ...intent, attemptId: randomUUID() } } });
+    assert.equal(Object.keys((await f.store.list({ summary: true }))[0].pendingRequests).length, 1);
+  }
+});
+
+test('旧 PID-only 执行锁即使碰巧等于当前进程编号，也通过创建时间释放', async () => {
+  const f = await fixture(), path = join(f.dataDir, 'dispatcher.lock');
+  await writeFile(path, String(process.pid)); await utimes(path, new Date(0), new Date(0));
+  const live = new LiveExecution({ dataDir: f.dataDir, createApi: f.createApi });
+  await live.start(f.dir); assert.equal(f.calls(), 1);
 });

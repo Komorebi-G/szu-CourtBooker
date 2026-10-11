@@ -8,10 +8,18 @@ import { HttpClient } from '../desktop/src/http-client.js';
 import { SzuVenueApi } from '../shared/api.js';
 import { importSessionFromCdp, loadSession, saveSession } from '../desktop/src/session.js';
 import { sleep } from '../shared/utils.js';
+import { browserCdpPort } from '../shared/browser-port.js';
 
 const sessionPath = process.env.SZU_SESSION || DEFAULT_SESSION_FILE;
 await mkdir(dirname(sessionPath), { recursive: true });
-const stagingPath = `${sessionPath}.login-${randomUUID()}`;
+const stagingPath = process.env.SZU_AUTH_STAGING || `${sessionPath}.login-${randomUUID()}`;
+const port = browserCdpPort(process.env.SZU_BROWSER || 'edge');
+let launcherChild;
+process.once('SIGTERM', async () => {
+  launcherChild?.kill('SIGTERM');
+  try { await rm(stagingPath, { force: true }); }
+  finally { process.exit(130); }
+});
 
 function runLoginLauncher() {
   return new Promise((resolve, reject) => {
@@ -21,6 +29,7 @@ function runLoginLauncher() {
       stdio: 'inherit',
       windowsHide: true,
     });
+    launcherChild = child;
     child.once('error', reject);
     child.once('exit', (code) => {
       if (code === 0) resolve();
@@ -51,14 +60,16 @@ const deadline = Date.now() + 5 * 60_000;
 let lastMessage = '';
 while (Date.now() < deadline) {
   try {
-    await importSessionFromCdp(stagingPath);
+    await importSessionFromCdp(stagingPath, port);
     const identity = await verify();
     if (process.env.SZU_EXPECTED_USER_ID && identity.id !== process.env.SZU_EXPECTED_USER_ID) {
       throw new Error(`浏览器当前为 ${identity.name}，请在学校页面切换到此任务用户`);
     }
-    await saveSession(await loadSession(stagingPath), sessionPath);
-    await rm(stagingPath, { force: true });
-    console.log(`登录态已保存，当前用户：${identity.name}`);
+    if (process.env.SZU_AUTH_CONFIRM_IDENTITY !== '1') {
+      await saveSession(await loadSession(stagingPath), sessionPath);
+      await rm(stagingPath, { force: true });
+    }
+    console.log(`已检测到学校用户：${identity.name}，请回助手确认绑定`);
     process.exit(0);
   } catch (error) {
     const message = error.message;

@@ -10,11 +10,13 @@ import { SessionExpiredError } from '../../shared/errors.js';
 export class AccountStore {
   constructor({ dataDir, legacySessionPath, verifyIdentity, renewSession }) {
     Object.assign(this, { dataDir, legacySessionPath, renewSession });
-    this.verifyIdentity = verifyIdentity ?? (async (session, path) => {
-      const client = path ? await HttpClient.create({ sessionPath: path }) : new HttpClient(session);
+    this.bindingQueue = Promise.resolve();
+    this.revisions = new Map();
+    this.verifyIdentity = verifyIdentity ?? (async (session, path, options = {}) => {
+      const client = path ? await HttpClient.create({ sessionPath: path, priority: options.priority ?? 'background' }) : new HttpClient(session);
       const api = new SzuVenueApi(client);
-      const identity = await api.getIdentity();
-      await api.getAvailableDates();
+      const identity = await api.getIdentity(options);
+      await api.getAvailableDates(options);
       if (path) await client.flush();
       return identity;
     });
@@ -27,7 +29,11 @@ export class AccountStore {
   async metadata(id = 'default') {
     const path = join(this.dir(id), 'account.json');
     if (id === 'default' && !await exists(path)) return { id, name: '我的账号' };
-    return readJson(path);
+    const metadata = await readJson(path);
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || typeof metadata.name !== 'string') {
+      throw new Error('账号备注记录格式异常');
+    }
+    return metadata;
   }
   async setMetadata(id, metadata) {
     await mkdir(this.dir(id), { recursive: true, mode: 0o700 });
@@ -45,7 +51,13 @@ export class AccountStore {
       if (error.code === 'ENOENT') return [];
       throw error;
     });
-    return Promise.all(['default', ...ids.filter((id) => /^[a-f0-9-]{36}$/.test(id))].map((id) => this.summary(id)));
+    return Promise.all(['default', ...ids.filter((id) => /^[a-f0-9-]{36}$/.test(id))].map(async (id) => {
+      try { return await this.summary(id); }
+      catch (error) {
+        return { id, name: '待修复账号', user: null, userId: null, exists: await exists(this.sessionPath(id)),
+          valid: false, corrupt: true, error: `账号记录无法读取（${error.code ?? '格式异常'}），原文件已保留；请清除登录后重新添加` };
+      }
+    }));
   }
   async create(name) {
     name = String(name ?? '').trim();
@@ -55,40 +67,82 @@ export class AccountStore {
     return this.summary(id);
   }
   async import(id, text) {
+    const revision = this.revisions.get(id) ?? 0;
     const metadata = await this.metadata(id);
     const session = parseSessionText(text);
     if (metadata.userId) {
       const identity = await this.verifyIdentity(session);
       if (identity.id !== metadata.userId) throw new Error('导入的学校账号与此用户不一致，请新增账号后导入');
+      await this.assertUnique(id, identity.id);
     }
-    await mkdir(this.dir(id), { recursive: true, mode: 0o700 });
-    await saveSession(session, this.sessionPath(id));
-    await this.setMetadata(id, { ...metadata, verifiedAt: null });
+    const work = this.bindingQueue.then(async () => {
+      if ((this.revisions.get(id) ?? 0) !== revision) throw new Error('此账号的登录状态已变化，请重新导入');
+      if (metadata.userId) await this.assertUnique(id, metadata.userId);
+      await mkdir(this.dir(id), { recursive: true, mode: 0o700 });
+      await saveSession(session, this.sessionPath(id));
+      await this.setMetadata(id, { ...metadata, verifiedAt: null });
+      this.revisions.set(id, revision + 1);
+    });
+    this.bindingQueue = work.catch(() => {}); await work;
     return this.summary(id);
   }
-  async verify(id = 'default') {
+  async assertUnique(id, userId) {
+    const other = (await this.list()).find((a) => a.id !== id && a.exists && a.userId === userId);
+    if (other) throw new Error(`此学校账号已绑定“${other.name}”，请使用该用户；若是旧重复记录，请先清除其中一份登录`);
+  }
+  async inspectLogin(id, stagingPath) {
     const metadata = await this.metadata(id);
-    const path = this.sessionPath(id);
-    let identity;
+    const identity = await this.verifyIdentity(await loadSession(stagingPath), stagingPath);
+    if (metadata.userId && metadata.userId !== identity.id) throw new Error('登录身份与此用户不一致，原登录未改动');
+    await this.assertUnique(id, identity.id);
+    return identity;
+  }
+  async commitIdentity(id, identity, session, check = () => {}) {
+    // Only the short binding commit is serialized. Slow school reads remain independent.
+    const work = this.bindingQueue.then(async () => {
+      const metadata = await this.metadata(id);
+      if (metadata.userId && metadata.userId !== identity.id) throw new Error('当前登录与任务账号不一致，请恢复该用户的登录状态');
+      await this.assertUnique(id, identity.id);
+      check();
+      if (session) await saveSession(session, this.sessionPath(id));
+      await this.setMetadata(id, { ...metadata, userId: identity.id, userName: identity.name,
+        verifiedAt: new Date().toISOString() });
+      this.revisions.set(id, (this.revisions.get(id) ?? 0) + 1);
+    });
+    this.bindingQueue = work.catch(() => {}); return work;
+  }
+  async bindLogin(id, stagingPath, { check = () => {} } = {}) {
+    const identity = await this.inspectLogin(id, stagingPath);
+    await this.commitIdentity(id, identity, await loadSession(stagingPath), check);
+    return this.summary(id);
+  }
+  async verify(id = 'default', options = {}) {
+    const revision = this.revisions.get(id) ?? 0;
+    const metadata = await this.metadata(id), path = this.sessionPath(id);
+    let identity, renewedSession;
     try {
-      try { identity = await this.verifyIdentity(await loadSession(path), path); }
+      try { identity = await this.verifyIdentity(await loadSession(path), path, options); }
       catch (error) {
         if (!(error instanceof SessionExpiredError) || !this.renewSession) throw error;
-        const renewed = await this.renewSession(metadata.userId);
-        if (metadata.userId && renewed.identity.id !== metadata.userId) {
+        if (!metadata.userId) throw new SessionExpiredError('尚未绑定学校身份，请点击浏览器登录并确认用户');
+        const renewed = await this.renewSession(metadata.userId, (await loadSession(path)).browserCdpPort, options);
+        if (renewed.identity.id !== metadata.userId) {
           throw new SessionExpiredError('浏览器统一认证的是另一个学校账号，原账号登录状态未改动');
         }
-        await saveSession(renewed.session, path);
-        identity = renewed.identity;
+        renewedSession = renewed.session; identity = renewed.identity;
       }
-      if (metadata.userId && metadata.userId !== identity.id) throw new Error('当前登录与任务账号不一致，请恢复该用户的登录状态');
-    }
-    catch (error) {
-      await this.setMetadata(id, { ...metadata, verifiedAt: null });
+      await this.commitIdentity(id, identity, renewedSession, () => {
+        if ((this.revisions.get(id) ?? 0) !== revision) throw new Error('此账号的登录状态已变化，请重新验证');
+        options.signal?.throwIfAborted();
+        if (Number.isFinite(options.deadline) && Date.now() >= options.deadline) throw new Error('登录验证已超过准备截止时间');
+      });
+    } catch (error) {
+      const cleanup = this.bindingQueue.then(async () => {
+        if ((this.revisions.get(id) ?? 0) === revision) await this.setMetadata(id, { ...await this.metadata(id), verifiedAt: null });
+      });
+      this.bindingQueue = cleanup.catch(() => {}); await cleanup;
       throw error;
     }
-    await this.setMetadata(id, { ...metadata, userId: identity.id, userName: identity.name,
-      verifiedAt: new Date().toISOString() });
     return { ...await this.summary(id), valid: true };
   }
   async export(id = 'default') {
@@ -97,9 +151,13 @@ export class AccountStore {
       exportedAt: new Date().toISOString(), session: await loadSession(this.sessionPath(id)) };
   }
   async clear(id = 'default') {
-    const metadata = await this.metadata(id);
-    await rm(this.sessionPath(id), { force: true });
-    await this.setMetadata(id, { ...metadata, verifiedAt: null });
+    const work = this.bindingQueue.then(async () => {
+      const metadata = await this.metadata(id).catch(() => ({ id, name: '待修复账号' }));
+      await rm(this.sessionPath(id), { force: true });
+      await this.setMetadata(id, { ...metadata, verifiedAt: null });
+      this.revisions.set(id, (this.revisions.get(id) ?? 0) + 1);
+    });
+    this.bindingQueue = work.catch(() => {}); await work;
     return this.summary(id);
   }
 }

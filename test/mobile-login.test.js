@@ -38,6 +38,25 @@ test('手机登录写入失败回滚内存，原账号保持可用', async () =>
   await assert.rejects(saveSchoolLogin(f.store, captured, { accountId: 'a', verify: async () => ({ id: 'A', name: '同学甲' }) }), /空间不足/);
   assert.deepEqual(f.store.state, before);
 });
+test('重新登录写入失败时，排队目录保存不能提交尚未保存的新账号', async () => {
+  const f = fixture(); let entered, rejectLogin, writes = 0, saved;
+  const writing = new Promise((resolve) => entered = resolve);
+  f.store.device.writeState = async ({ value }) => {
+    if (++writes === 1) { entered(); await new Promise((_, reject) => rejectLogin = reject); }
+    saved = JSON.parse(value);
+  };
+  const login = saveSchoolLogin(f.store, captured, { accountId: 'a', name: '新备注', verify: async () => ({ id: 'A', name: '同学甲' }) });
+  const failed = assert.rejects(login, /空间不足/);
+  await writing;
+  f.store.state.catalogs['a:badminton'] = { times: ['19:00-20:00'], courts: [] };
+  const catalogSave = f.store.save();
+  rejectLogin(new Error('空间不足'));
+  await failed; await catalogSave;
+  assert.equal(f.store.state.accounts[0].name, '原备注');
+  assert.equal(saved.accounts[0].name, '原备注');
+  assert.deepEqual(saved.accounts[0].session, { old: true });
+  assert.deepEqual(saved.catalogs['a:badminton'].times, ['19:00-20:00']);
+});
 test('手机登录实际验证链路仅请求身份和日期，保存响应刷新Cookie', async () => {
   const f = fixture(); const calls = [];
   const transport = async (url, options) => {

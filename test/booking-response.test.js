@@ -13,7 +13,8 @@ for (const body of ['{}', 'null', '[]', '"ok"', '{"code":0}', '{"code":""}', '{"
     } });
     const api = new SzuVenueApi(client); api.identity = { id: 'a', name: 'test' };
     const deadline = Date.now() + 1000;
-    await assert.rejects(api.book({ date: '2026-09-21', time: '15:00-16:00', room: {}, modeCode: '1.0', deadline }));
+    await assert.rejects(api.book({ date: '2026-09-21', time: '15:00-16:00',
+      room: { WID: 'A', CGBM: 'v', XMDM: '001', XQDM: '1' }, modeCode: '1.0', deadline }));
     assert.equal(request.url, BASE_URL + 'sportVenue/insertVenueBookingInfo.do');
     assert.equal(request.options.deadlineMs, deadline);
   });

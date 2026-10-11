@@ -5,6 +5,16 @@ import { BASE_URL } from '../shared/constants.js';
 
 const response = (...cookies) => ({ headers: { getSetCookie: () => cookies } });
 
+test('Cookie 路径按目录边界匹配，不发送到仅同前缀的其他路径', () => {
+  const client = new CoreHttpClient({ cookies: [{ name: '_WEU', value: 'scoped', domain: 'ehall.szu.edu.cn', path: '/app' }] });
+  assert.equal(client.cookieHeader('https://ehall.szu.edu.cn/app'), '_WEU=scoped');
+  assert.equal(client.cookieHeader('https://ehall.szu.edu.cn/app/orders'), '_WEU=scoped');
+  assert.equal(client.cookieHeader('https://ehall.szu.edu.cn/application'), '');
+  client.session.cookies[0].path = '/app/';
+  assert.equal(client.cookieHeader('https://ehall.szu.edu.cn/app/orders'), '_WEU=scoped');
+  assert.equal(client.cookieHeader('https://ehall.szu.edu.cn/app'), '');
+});
+
 test('响应 Cookie 的 Max-Age 到期后不再发送，且优先于 Expires', (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-09-20T00:00:00Z') });
   const client = new CoreHttpClient({ cookies: [] });

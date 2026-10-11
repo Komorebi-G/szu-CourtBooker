@@ -31,7 +31,7 @@ async function reusable(url, identity, timeoutMs) {
     const remote = await health.json();
     if (!remote.ready || !Object.entries(identity).every(([key, value]) => remote[key] === value)) return false;
     // A process can outlive its extracted files. A working API alone is insufficient.
-    for (const [path, type] of [['/', 'text/html'], ['/app.js', 'javascript'], ['/styles.css', 'text/css']]) {
+    for (const [path, type] of [['/', 'text/html'], ['/app.js', 'javascript'], ['/styles.css', 'text/css'], ['/experience.js', 'javascript']]) {
       const response = await request(path);
       const content = await response.text();
       if (!response.ok || !response.headers.get('content-type')?.includes(type) || !content.trim()) return false;

@@ -5,13 +5,13 @@ import { once } from 'node:events';
 import { startManagerServer } from '../desktop/src/manager-server.js';
 
 const identity = { app: 'szu-court-booker', protocol: 1, build: 'current', profile: 'home-a' };
-async function serve(t, { health = identity, broken = false, hang = false, legacy = false } = {}) {
+async function serve(t, { health = identity, broken = false, missingExperience = false, hang = false, legacy = false } = {}) {
   const server = createServer((req, res) => {
     if (hang) return;
     if (req.url === '/api/health') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(legacy ? { ok: false } : { ...health, ready: true })); }
     else if (req.url === '/api/bootstrap') res.end(JSON.stringify({ app: 'szu-court-booker' }));
-    else if (broken) { res.writeHead(404, { 'content-type': 'application/json' }); res.end('{"ok":false,"error":"页面不存在"}'); }
-    else { res.setHeader('content-type', req.url === '/' ? 'text/html' : req.url === '/app.js' ? 'text/javascript' : 'text/css'); res.end(req.url === '/' ? '<html>test</html>' : 'test'); }
+    else if (broken || (missingExperience && req.url === '/experience.js')) { res.writeHead(404, { 'content-type': 'application/json' }); res.end('{"ok":false,"error":"页面不存在"}'); }
+    else { res.setHeader('content-type', req.url === '/' ? 'text/html' : req.url.endsWith('.js') ? 'text/javascript' : 'text/css'); res.end(req.url === '/' ? '<html>test</html>' : 'test'); }
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => { server.closeAllConnections(); server.close(); });
@@ -24,6 +24,7 @@ function fresh(t) {
 for (const [name, options] of [
   ['旧版API正常但页面不存在', { legacy: true, broken: true }],
   ['同版实例的页面缓存丢失', { broken: true }],
+  ['主界面存在但交互模块缺失', { missingExperience: true }],
   ['不同构建版本', { health: { ...identity, build: 'old' } }],
   ['不同数据目录', { health: { ...identity, profile: 'home-b' } }],
   ['端口上的服务不响应', { hang: true }],

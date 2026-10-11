@@ -10,6 +10,18 @@ function includesSport(venue, code) {
   return String(venue.XM).split(',').includes(code);
 }
 
+// School order rows sometimes identify a court only by its display name. Use a
+// saved label only when there is no ID; a known, different ID wins over a name.
+export function matchesCourtSelection(target, room) {
+  if (!room || (!room.WID && (!room.CDMC || room.CDMC === '学校已约场地'))) return false;
+  if (room.CGBM && target.venues?.length && !target.venues.some((venue) => String(venue.CGBM) === String(room.CGBM))) return false;
+  if (room.XQDM && target.campusCode && String(room.XQDM) !== String(target.campusCode)) return false;
+  if (room.YYLX && target.modeCode && Number(room.YYLX) !== Number(target.modeCode)) return false;
+  return !target.courtNames || target.includeOtherCourts === true
+    || target.courtNames.some((court) => court === room.WID || court === room.CDMC
+      || (!room.WID && target.courtLabels?.[court] === room.CDMC));
+}
+
 export function resolveTargets(config, metadata) {
   const enabled = config.targets.filter((target) => target.enabled !== false);
   if (enabled.length === 0) throw new Error('没有启用的预约目标');

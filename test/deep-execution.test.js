@@ -14,13 +14,15 @@ import { CoreHttpClient } from '../shared/http-client-core.js';
 import { SzuVenueApi } from '../shared/api.js';
 import { HttpClient } from '../desktop/src/http-client.js';
 import { saveSession, loadSession } from '../desktop/src/session.js';
-import { shanghaiDate } from '../shared/utils.js';
+import { shanghaiDate, addDays } from '../shared/utils.js';
+import { readDiagnosticJournal } from '../desktop/src/diagnostics.js';
+import { exportDiagnostics } from '../shared/diagnostics.js';
 
 // Real HTTP sockets and real request parsing. Never contacts the school:
 // only the transport destination is replaced, not the API/execution logic.
-async function laboratory(t, { identity = () => 'A', submit } = {}) {
+async function laboratory(t, { identity = () => 'A', submit, bookings = () => [] } = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'szu-deep-'));
-  const submissions = [], identityReads = [];
+  const submissions = [], identityReads = [], bookingReads = [];
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const form = new URLSearchParams(Buffer.concat(chunks).toString());
@@ -48,6 +50,11 @@ async function laboratory(t, { identity = () => 'A', submit } = {}) {
       }
       result = { code: '0', data: { DHID: 'order-' + submissions.length } };
     } else if (endpoint === 'getRqList.do') result = [];
+    else if (endpoint === 'myBookingInfo.do') {
+      bookingReads.push(Object.fromEntries(form));
+      const rows = bookings();
+      result = { code: '0', datas: { myBookingInfo: { rows, totalSize: rows.length } } };
+    }
     else { res.writeHead(404); res.end(); return; }
     res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(result));
   });
@@ -67,20 +74,92 @@ async function laboratory(t, { identity = () => 'A', submit } = {}) {
     const id = randomUUID(), dir = store.path(id); await mkdir(dir, { recursive: true });
     await writeJson(join(dir, 'job.json'), { id, mode: 'now', taskId: id,
       sessionPath: 'unused', accountIdentityId: 'A', releaseAt: Date.now(), createdAt: new Date().toISOString(),
-      config: { targets: [{ name: 'Test', date: shanghaiDate(), campus: '粤海校区', sport: '羽毛球',
+      config: { targets: [{ name: 'Test', date: addDays(shanghaiDate(), 1), campus: '粤海校区', sport: '羽毛球',
         mode: '包场', venues: ['东馆'], courts: ['A'], times: [time] }],
       scheduler: { timeoutMs: 2000, queryConcurrency: 1, pollIntervalMs: 100 }, booking: { taskConcurrency: 1 } } });
     await writeJson(join(dir, 'state.json'), { status: 'queued', logs: [], successes: [] });
     return { id, dir };
   }
-  return { dataDir, live, store, job, submissions, identityReads, origin };
+  return { dataDir, live, store, job, submissions, identityReads, bookingReads, origin };
 }
 
-test('真实 HTTP 链路：下单使用已经验证的身份，不能被包装对象绕过缓存另换账号', async (t) => {
+test('真实 HTTP：已有一段时，并发桌面任务共享最后一个名额，只查询一次学校记录', async (t) => {
+  const f = await laboratory(t, { bookings: () => [{ YYRQ: addDays(shanghaiDate(), 1), KYYSJD: '18:00-19:00',
+    XMDM: '001', YYZT_DISPLAY: '已支付', CDWID: 'court', CDMC: 'A' }] });
+  const a = await f.job(), b = await f.job('20:00-21:00');
+  await Promise.all([f.live.start(a.dir), f.live.start(b.dir)]);
+  assert.equal(f.submissions.length, 1); assert.equal(f.bookingReads.length, 1);
+  const states = await Promise.all([f.store.get(a.id), f.store.get(b.id)]);
+  assert.ok(states.some((s) => s.status === 'success')); assert.ok(states.some((s) => s.status === 'limited'));
+});
+test('真实 HTTP：学校已有两个未选时段，桌面执行不再提交', async (t) => {
+  const f = await laboratory(t, { bookings: () => ['17:00-18:00', '18:00-19:00'].map((time) => ({
+    YYRQ: addDays(shanghaiDate(), 1), KYYSJD: time, XMDM: '001', YYZT_DISPLAY: '已支付', CDWID: 'court', CDMC: 'A',
+  })) });
+  const job = await f.job(); await f.live.start(job.dir);
+  assert.equal(f.submissions.length, 0); assert.equal((await f.store.get(job.id)).status, 'limited');
+});
+test('真实 HTTP：学校已有预约与候选部分重叠，不重复提交', async (t) => {
+  const f = await laboratory(t, { bookings: () => [{ YYRQ: addDays(shanghaiDate(), 1), KYYSJD: '19:30-20:30',
+    XMDM: '001', YYZT_DISPLAY: '已支付', CDWID: 'court', CDMC: 'A' }] });
+  const a = await f.job(), b = await f.job('20:00-21:00');
+  await Promise.all([f.live.start(a.dir), f.live.start(b.dir)]);
+  assert.equal(f.submissions.length, 0);
+  for (const job of [a, b]) assert.match((await f.store.get(job.id)).error, /重叠/);
+});
+test('真实 HTTP：学校订单未知时桌面停止预约，保留核对原因', async (t) => {
+  const f = await laboratory(t, { bookings: () => [{ YYRQ: addDays(shanghaiDate(), 1), KYYSJD: '19:30-20:30',
+    XMDM: '001', YYZT_DISPLAY: '未知状态' }] });
+  const job = await f.job(); await f.live.start(job.dir);
+  assert.equal(f.submissions.length, 0); assert.match((await f.store.get(job.id)).error, /人工核对/);
+});
+test('真实 HTTP：桌面首单收到账号冻结，释放名额队列前阻止兄弟任务', async (t) => {
+  const f = await laboratory(t, { submit: async ({ res }) => {
+    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ code: '1', msg: '账号冻结' })); return true;
+  } });
+  const a = await f.job(), b = await f.job('20:00-21:00');
+  await Promise.all([f.live.start(a.dir), f.live.start(b.dir)]);
+  assert.equal(f.submissions.length, 1);
+  for (const job of [a, b]) assert.match((await f.store.get(job.id)).error, /账号冻结/);
+});
+
+test('真实 HTTP 链路：校时期间身份改变时，放号前复验阻止提交', async (t) => {
   const f = await laboratory(t, { identity: (n) => n === 0 ? 'A' : 'B' });
   const job = await f.job(); await f.live.start(job.dir);
-  assert.deepEqual(f.identityReads, ['A'], '下单前额外读取身份，说明验证与提交不共享身份状态');
+  assert.deepEqual(f.identityReads, ['A', 'B']);
+  assert.deepEqual(f.submissions, []);
+  assert.match((await f.store.get(job.id)).error, /身份已改变/);
+});
+
+test('真实 HTTP 链路：启动和临近提交复验共享身份缓存，正式下单不再读身份', async (t) => {
+  const f = await laboratory(t);
+  const job = await f.job(); await f.live.start(job.dir);
+  assert.deepEqual(f.identityReads, ['A', 'A'], '启动与准备复验各读一次，正式 POST 使用已验证缓存');
   assert.deepEqual(f.submissions.map((form) => form.YYRGH), ['A']);
+  const state = await f.store.get(job.id);
+  const journal = await readDiagnosticJournal(job.dir);
+  const request = journal.find((e) => e.details?.event === 'booking_request');
+  const dispatched = journal.find((e) => e.details?.event === 'booking_dispatch');
+  const response = journal.find((e) => e.details?.event === 'booking_response');
+  assert.equal(request.details.requestId, dispatched.details.requestId);
+  assert.equal(request.details.requestId, response.details.requestId);
+  assert.equal(response.details.httpStatus, 200);
+  assert.equal(response.details.code, '0');
+  assert.ok(dispatched.details.dispatchDelayMs >= 0);
+  assert.equal(state.metrics.dispatched, 1);
+  const exported = exportDiagnostics(state, journal);
+  assert.equal(exported.missingEvents, 0);
+  assert.ok(!JSON.stringify(exported).includes('order-1'));
+});
+
+test('立即模式的本机确认时间不得被当作学校放号时间再等待', { timeout: 5000 }, async (t) => {
+  const f = await laboratory(t), job = await f.job();
+  const record = await readJson(join(job.dir, 'job.json'));
+  // An ahead local clock can persist a confirmation timestamp later than the
+  // real school release. Now mode must derive release from the booking date.
+  record.releaseAt = Date.now() + 60000; await writeJson(join(job.dir, 'job.json'), record);
+  await f.live.start(job.dir);
+  assert.equal(f.submissions.length, 1);
 });
 
 test('真实倒计时：启动验证成功但放号前会话失效时，重新核验必须阻止提交', { timeout: 10000 }, async (t) => {
@@ -104,6 +183,11 @@ test('真实 HTTP 断线：学校已收到首单但响应丢失，其他任务�
   assert.equal(f.submissions.length, 1, '首单结果未知后仍向学校发送了后续任务');
   const states = await Promise.all([f.store.get(a.id), f.store.get(b.id)]);
   assert.ok(states.some((state) => Object.keys(state.pendingRequests).length === 1));
+  const failedJob = [a, b][states.findIndex((state) => Object.keys(state.pendingRequests).length === 1)];
+  const journal = await readDiagnosticJournal(failedJob.dir);
+  const failed = journal.find((e) => e.details?.event === 'booking_error');
+  assert.equal(failed.details.outcome, 'unknown');
+  assert.equal(failed.details.requestId, journal.find((e) => e.details?.event === 'booking_dispatch').details.requestId);
 });
 
 test('真实文件故障：成功响应落盘失败时，不继续其他任务', async (t) => {
@@ -132,6 +216,76 @@ test('真实文件故障：成功响应落盘失败时，不继续其他任务',
   assert.equal(Object.keys(previous.pendingRequests).length, 1, '最后的持久记录须保留待核对意图');
 });
 
+for (const code of ['0', '1']) {
+  test(`真实 HTTP 与会话文件故障：明确${code === '0' ? '成功' : '满员'}响应不能被 Cookie 保存错误覆盖`, async (t) => {
+    let sessionPath, bothReady, reads = 0;
+    const roomsReady = new Promise((resolve) => { bothReady = resolve; });
+    const f = await laboratory(t, { submit: async ({ res }) => {
+      // Both plans have finished their read-only preparation. The first
+      // mutation receives a definite result and rotates its session cookie.
+      await rename(sessionPath, sessionPath + '.before-failure'); await mkdir(sessionPath);
+      res.setHeader('content-type', 'application/json');
+      res.setHeader('set-cookie', 'ticket=fresh; Path=/');
+      res.end(JSON.stringify(code === '0' ? { code, data: { DHID: 'known-success' } } : { code, msg: '场地满员' }));
+      return true;
+    } });
+    sessionPath = join(f.dataDir, 'session.json');
+    await saveSession({ userAgent: 'test', cookies: [] }, sessionPath);
+    f.live.createApi = async () => {
+      const client = await HttpClient.create({ sessionPath, transport: (url, options) =>
+        fetch(new URL(new URL(url).pathname, f.origin), options) });
+      const api = new SzuVenueApi(client), readRooms = api.getOpeningRooms.bind(api);
+      api.getOpeningRooms = async (input) => {
+        const rows = await readRooms(input);
+        if (++reads === 2) bothReady();
+        await roomsReady; return rows;
+      };
+      return { client, api };
+    };
+    const a = await f.job(), b = await f.job('20:00-21:00');
+    await Promise.all([f.live.start(a.dir), f.live.start(b.dir)]);
+    assert.equal(f.submissions.length, 1, 'Cookie 保存失败后仍发送了兄弟方案');
+    const states = await Promise.all([f.store.get(a.id), f.store.get(b.id)]);
+    for (const state of states) {
+      assert.equal(state.status, state.successes.length ? 'partial' : 'error'); assert.match(state.error, /登录状态保存失败/);
+      assert.deepEqual(state.pendingRequests, {}); assert.equal(state.metrics.unknown, 0);
+    }
+    const successes = states.flatMap((state) => state.successes);
+    assert.equal(successes.length, code === '0' ? 1 : 0);
+    if (code === '0') assert.equal(successes[0].orderId, 'known-success');
+    const requestJournal = await readDiagnosticJournal([a, b][states.findIndex((state) => state.metrics.dispatched)].dir);
+    assert.equal(requestJournal.find((entry) => entry.details?.event === 'booking_response').details.code, code);
+  });
+}
+
+test('会话保存失败附带畸形业务响应，仍不能建立已知预约结果', async () => {
+  const failure = Object.assign(new Error('disk failure'), { requestResult: { data: {}, status: 200, startedAt: Date.now() } });
+  const api = new SzuVenueApi({ async post() { throw failure; } });
+  api.identity = { id: 'A', name: 'Test' };
+  await assert.rejects(api.book({ date: '2026-10-12', time: '19:00-20:00', modeCode: '1.0',
+    room: { WID: 'court', CGBM: 'v', XMDM: '001', XQDM: '1' } }), /结果待确认/);
+});
+
+test('直接桌面执行没有共享 quota 时，保留成功并停止同方案的后续时段', async (t) => {
+  const f = await laboratory(t);
+  const job = await f.job(), config = await readJson(join(job.dir, 'job.json'));
+  config.config.targets[0].times.push('20:00-21:00');
+  await writeJson(join(job.dir, 'job.json'), config);
+  let submissions = 0;
+  const createApi = async () => {
+    const client = new CoreHttpClient({ userAgent: 'test', cookies: [] }, {
+      transport: (url, options) => fetch(new URL(new URL(url).pathname, f.origin), options),
+    });
+    const api = new SzuVenueApi(client);
+    api.book = async () => { submissions++; return { code: '0', data: { DHID: 'known-direct' }, persistenceError: 'disk failure' }; };
+    return { client, api };
+  };
+  await executeJob(job.dir, { manualStart: true, createApi });
+  const state = await readJson(join(job.dir, 'state.json'));
+  assert.equal(submissions, 1); assert.equal(state.successes[0].orderId, 'known-direct');
+  assert.deepEqual(state.pendingRequests, {}); assert.match(state.error, /登录状态保存失败/);
+});
+
 test('半写入记录不应阻断所有任务列表和旧定时清理', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'szu-torn-record-'));
   const id = randomUUID(), dir = join(dataDir, 'jobs', id); await mkdir(dir, { recursive: true });
@@ -145,8 +299,10 @@ test('半写入记录不应阻断所有任务列表和旧定时清理', async ()
   await store.retireSchedules();
   assert.equal(await readFile(join(dir, 'stop'), 'utf8').then(Boolean), true);
   await writeFile(join(dir, 'run.lock'), String(process.pid));
-  await assert.rejects(store.remove(id), /执行锁尚未释放/);
+  await assert.rejects(store.remove(id), /记录损坏.*核对/);
+  await assert.rejects(store.recordReview(id, { acknowledgeCorrupt: true }), /执行锁尚未释放/);
   await rm(join(dir, 'run.lock'));
+  await store.recordReview(id, { acknowledgeCorrupt: true });
   await store.remove(id);
   assert.equal(await exists(dir), false);
   assert.equal(await exists(join(dataDir, 'trash', id, 'job.json')), true, '损坏记录也应能归档删除，并保留原文件');

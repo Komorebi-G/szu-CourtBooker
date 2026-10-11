@@ -1,5 +1,6 @@
 import { BASE_URL } from './constants.js';
-import { SessionExpiredError, RequestNotSentError } from './errors.js';
+import { SessionExpiredError, RequestNotSentError, HttpResponseError } from './errors.js';
+import { combineAbortSignals, timedAbortSignal } from './abort-signal.js';
 export { SessionExpiredError } from './errors.js';
 
 function parseSetCookie(header) {
@@ -46,7 +47,9 @@ export class CoreHttpClient {
       .filter((cookie) => {
         const domain = cookie.domain.replace(/^\./, '');
         const domainMatches = parsed.hostname === domain || parsed.hostname.endsWith(`.${domain}`);
-        const pathMatches = parsed.pathname.startsWith(cookie.path || '/');
+        const path = cookie.path || '/';
+        const pathMatches = parsed.pathname === path || (parsed.pathname.startsWith(path)
+          && (path.endsWith('/') || parsed.pathname[path.length] === '/'));
         const alive = cookie.expires == null || cookie.expires < 0 || cookie.expires > now;
         return domainMatches && pathMatches && alive;
       })
@@ -71,7 +74,7 @@ export class CoreHttpClient {
     }
   }
 
-  async request(path, { method = 'GET', form, expect = 'json', timeoutMs, deadlineMs, signal } = {}) {
+  async request(path, { method = 'GET', form, expect = 'json', timeoutMs, deadlineMs, signal, onDispatch, beforeDispatch, abortInFlight = false, requestId, requestMetadata } = {}) {
     // Check again at actual dispatch: a desktop request may have waited for
     // another request to finish updating this account's cookies. In-flight
     // responses still use only the timeout signal so Stop cannot hide success.
@@ -94,30 +97,49 @@ export class CoreHttpClient {
       );
     }
 
+    beforeDispatch?.();
     const startedAt = Date.now();
     if (Number.isFinite(deadlineMs) && startedAt >= deadlineMs) {
       throw new RequestNotSentError('执行窗口已结束，未发送请求');
     }
-    const response = await this.transport(url, {
+    // Read-only preparation must yield the account's connection before release.
+    // A sent booking still waits for its response when Stop is pressed.
+    const requestTimeoutMs = Math.max(1, Math.ceil(abortInFlight && Number.isFinite(deadlineMs)
+      ? Math.min(timeoutMs ?? this.timeoutMs, deadlineMs - startedAt) : timeoutMs ?? this.timeoutMs));
+    const timeout = timedAbortSignal(requestTimeoutMs);
+    const combined = combineAbortSignals(abortInFlight ? [timeout.signal, signal] : [timeout.signal]);
+    onDispatch?.({ startedAt });
+    let response, text, endedAt;
+    try { response = await this.transport(url, {
       method,
       headers,
       body,
       redirect: 'manual',
       deadlineMs,
-      signal: AbortSignal.timeout(timeoutMs ?? this.timeoutMs),
+      timeoutMs: requestTimeoutMs,
+      abortInFlight,
+      requestId,
+      requestMetadata,
+      beforeDispatch: () => {
+        if (signal?.aborted) throw new RequestNotSentError('本次执行已停止，未发送请求');
+        headers.cookie = this.cookieHeader(url); beforeDispatch?.();
+      },
+      signal: combined.signal,
     });
-    const endedAt = Date.now();
-    this.updateCookies(response);
-    const text = await response.text();
+      endedAt = Date.now();
+      this.updateCookies(response);
+      text = await response.text();
+    } finally { combined.dispose(); timeout.dispose(); }
     const contentType = response.headers.get('content-type') ?? '';
 
     if (response.status === 301 || response.status === 302 || response.status === 401) {
       throw new SessionExpiredError('登录态已失效，请重新登录并导入 Cookie');
     }
+    // An HTML gateway outage is a network failure, not evidence of an expired login.
+    if (!response.ok && response.status !== 403) throw new HttpResponseError(response.status, url.pathname);
     if (response.status === 403 || (expect === 'json' && contentType.includes('text/html'))) {
       throw new SessionExpiredError('请求被拒绝，登录态可能已失效，请重新导入 Cookie');
     }
-    if (!response.ok) throw new Error(`HTTP ${response.status} ${url.pathname}`);
 
     let data = text;
     if (expect === 'json') {
@@ -131,6 +153,7 @@ export class CoreHttpClient {
       data,
       status: response.status,
       date: response.headers.get('date'),
+      age: response.headers.get('age'),
       startedAt,
       endedAt,
     };

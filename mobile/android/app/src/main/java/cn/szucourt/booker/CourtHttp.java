@@ -13,6 +13,7 @@ import okhttp3.RequestBody;
 import okhttp3.MediaType;
 import okio.BufferedSink;
 import okhttp3.Response;
+import okhttp3.Call;
 
 /** Bounded retries only for known read-only endpoints (including query POSTs). */
 final class CourtHttp {
@@ -24,6 +25,10 @@ final class CourtHttp {
     private final OkHttpClient client;
 
     CourtHttp(OkHttpClient client) { this.client = client; }
+    static boolean isQuery(Request request) {
+        return request.method().equals("GET") && request.url().encodedPath().equals(ROOT + "index.do")
+            || request.method().equals("POST") && QUERY_POSTS.contains(request.url().encodedPath());
+    }
 
     static final class Result {
         final int status;
@@ -35,8 +40,30 @@ final class CourtHttp {
     }
 
     Result execute(Request request, Runnable checkExecution) throws IOException {
-        boolean query = request.method().equals("GET") && request.url().encodedPath().equals(ROOT + "index.do")
-            || request.method().equals("POST") && QUERY_POSTS.contains(request.url().encodedPath());
+        return execute(client, request, checkExecution, null, null, () -> {});
+    }
+
+    Result execute(Request request, Runnable checkExecution, long timeoutMs) throws IOException {
+        return execute(request, checkExecution, timeoutMs, null);
+    }
+
+    Result execute(Request request, Runnable checkExecution, long timeoutMs, Long deadlineMs) throws IOException {
+        return execute(request, checkExecution, timeoutMs, deadlineMs, null, () -> {});
+    }
+
+    Result execute(Request request, Runnable checkExecution, long timeoutMs, Long deadlineMs,
+            CourtRequestCancellation cancellation, Runnable beforeMutation) throws IOException {
+        return execute(client.newBuilder().callTimeout(timeoutMs, TimeUnit.MILLISECONDS).build(), request, checkExecution,
+            deadlineMs, cancellation, beforeMutation);
+    }
+
+    private Result execute(OkHttpClient activeClient, Request request, Runnable checkExecution, Long deadlineMs,
+            CourtRequestCancellation cancellation, Runnable beforeMutation) throws IOException {
+        boolean query = isQuery(request);
+        if (!query) cancellation = null;
+        // Preparation queries must release the connection by the deadline,
+        // including their retry. Sent mutations still wait for their result.
+        Long queryDeadline = query ? deadlineMs : null;
         // retryOnConnectionFailure(false) alone does not disable HTTP 503 follow-ups.
         // Mark POST bodies one-shot within each call; only our whitelist may start a new call.
         if (request.body() != null) {
@@ -49,14 +76,15 @@ final class CourtHttp {
             }).build();
         }
         try {
-            return read(client, request, checkExecution);
+            return read(activeClient, request, checkExecution, queryDeadline, cancellation, beforeMutation);
         } catch (IOException first) {
             if (!query) throw first;
+            if (cancellation != null) cancellation.check();
             // A private pool guarantees a fresh connection without disrupting other accounts.
             ConnectionPool pool = new ConnectionPool(0, 1, TimeUnit.SECONDS);
-            OkHttpClient fresh = client.newBuilder().connectionPool(pool).build();
+            OkHttpClient fresh = activeClient.newBuilder().connectionPool(pool).build();
             try {
-                return read(fresh, request, checkExecution);
+                return read(fresh, request, checkExecution, queryDeadline, cancellation, beforeMutation);
             } catch (IOException last) {
                 last.addSuppressed(first);
                 throw last;
@@ -64,11 +92,22 @@ final class CourtHttp {
         }
     }
 
-    private Result read(OkHttpClient http, Request request, Runnable checkExecution) throws IOException {
+    private Result read(OkHttpClient http, Request request, Runnable checkExecution, Long deadlineMs,
+            CourtRequestCancellation cancellation, Runnable beforeMutation) throws IOException {
         checkExecution.run();
-        try (Response response = http.newCall(request).execute()) {
+        if (cancellation != null) cancellation.check();
+        if (deadlineMs != null) {
+            long remaining = deadlineMs - System.currentTimeMillis();
+            if (remaining <= 0) throw new CourtExecutionGate.NotSent("准备窗口已结束，未发送查询");
+            long timeout = http.callTimeoutMillis();
+            http = http.newBuilder().callTimeout(timeout > 0 ? Math.min(timeout, remaining) : remaining, TimeUnit.MILLISECONDS).build();
+        }
+        if (!isQuery(request)) { beforeMutation.run(); checkExecution.run(); }
+        Call call = http.newCall(request);
+        if (cancellation != null) cancellation.attach(call);
+        try (Response response = call.execute()) {
             // Consume the body inside the retry boundary: execute() alone only reads headers.
             return new Result(response, response.body() == null ? "" : response.body().string());
-        }
+        } finally { if (cancellation != null) cancellation.detach(call); }
     }
 }

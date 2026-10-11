@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import YAML from 'yaml';
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_CONFIG_FILE, MODE_CODES } from '../../shared/constants.js';
+import { validateBookingGoal } from '../../shared/booking-goal.js';
 import { releaseEpoch, resolveDate, splitTimeSlot } from '../../shared/utils.js';
 
 const defaults = {
@@ -65,6 +66,7 @@ export function validateConfig(config) {
   config.targets.forEach((target, index) => {
     if (target.date) resolveDate(target.date);
     if (target.preferSameCourt !== undefined && typeof target.preferSameCourt !== 'boolean') throw new Error('优先同一场地必须为开关值');
+    if (target.includeOtherCourts !== undefined && typeof target.includeOtherCourts !== 'boolean') throw new Error('其余场地选项必须为开关值');
     const prefix = `targets[${index}]`;
     for (const key of ['name', 'campus', 'sport', 'mode']) {
       if (!target[key]) throw new Error(`${prefix}.${key} 不能为空`);
@@ -74,6 +76,7 @@ export function validateConfig(config) {
       throw new Error(`${prefix}.times 至少需要一个时间段`);
     }
     target.times.forEach(splitTimeSlot);
+    validateBookingGoal(target);
     for (const key of ['venues', 'courts']) {
       if (target[key] !== undefined && !Array.isArray(target[key])) {
         throw new Error(`${prefix}.${key} 必须是数组`);

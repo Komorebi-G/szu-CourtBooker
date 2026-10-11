@@ -2,11 +2,12 @@ import { CoreHttpClient } from '../../shared/http-client-core.js';
 import { SzuVenueApi } from '../../shared/api.js';
 import { resolveTargets } from '../../shared/planner.js';
 import { getProject } from '../../shared/projects.js';
-import { shanghaiDate, splitTimeSlot } from '../../shared/utils.js';
+import { shanghaiDate } from '../../shared/utils.js';
+import { readReferenceCatalog, mergeReferenceCatalogs, referenceDates } from '../../shared/catalog.js';
 import { nativeTransport } from './device.js';
 
 export function createConnection(store, device, account, token = null) {
-  const client = new CoreHttpClient(account.session, { transport: nativeTransport(device, token),
+  const client = new CoreHttpClient(account.session, { transport: nativeTransport(device, token, account.id),
     save: async () => { account.session = client.session; await store.save(); } });
   return { client, api: new SzuVenueApi(client) };
 }
@@ -15,30 +16,30 @@ export async function verifyAccount(store, device, account) {
   try {
     const identity = await api.getIdentity();
     if (account.userId && identity.id !== account.userId) throw new Error('登录身份改变，请恢复原账号，或新增一个用户');
+    if (store.state.accounts.some((a) => a.id !== account.id && a.userId === identity.id)) throw new Error('此学校账号已绑定其他用户，请使用原用户');
     account.userId = identity.id; account.user = identity.name; account.verifiedAt = new Date().toISOString();
     await store.save(); return identity;
   } finally { await client.flush(); }
 }
-export async function readCatalog(store, device, account, projectId) {
+export async function readCatalog(store, device, account, projectId, targetDate = shanghaiDate(), { signal } = {}) {
   const { api, client } = createConnection(store, device, account);
   try {
-    const identity = await api.getIdentity();
+    const identity = await api.getIdentity({ signal });
     if (account.userId && identity.id !== account.userId) throw new Error('登录身份不匹配，请更新登录');
     const project = getProject(projectId);
     const target = resolveTargets({ targets: [{ ...project, project: projectId, name: project.label,
-      enabled: true, times: ['19:00-20:00'], courts: ['*'] }] }, await api.getSportVenueData())[0];
-    const date = shanghaiDate();
-    const rows = await api.getTimeList({ campusCode: target.campusCode, sportCode: target.sportCode, modeCode: target.modeCode, date });
-    const times = rows.map((row) => row.CODE).filter((value) => { try { splitTimeSlot(value); return true; } catch { return false; } });
-    const courts = [];
-    for (const venue of target.venues) {
-      const rooms = await api.getOpeningRooms({ campusCode: target.campusCode, sportCode: target.sportCode,
-        modeCode: target.modeCode, venueCode: venue.CGBM, date, time: times[0] ?? '19:00-20:00' });
-      for (const room of rooms) if (!courts.some((c) => c.id === room.WID)) courts.push({ id: room.WID, name: room.CDMC });
-    }
-    if (!courts.length) throw new Error('没有读到场地目录，请检查登录或稍后重试');
-    const catalog = { date, times, courts };
-    store.state.catalogs[account.id + ':' + projectId] = catalog; await store.save();
+      enabled: true, times: ['19:00-20:00'], courts: ['*'] }] }, await api.getSportVenueData({ signal }))[0];
+    const reference = await readReferenceCatalog({ api, target, dates: referenceDates(targetDate), times: [],
+      cached: store.state.catalogs[account.id + ':' + projectId], deadline: Date.now() + 45_000, signal });
+    if (!reference.courts.length) throw new Error('参考日期暂未读到场地目录，可稍后刷新；正式执行会按目标日期重试');
+    const key = account.id + ':' + projectId;
+    // A refresh may finish after another refresh has saved new structure.
+    const merged = mergeReferenceCatalogs([reference], { target, cached: store.state.catalogs[key] });
+    const catalog = { date: reference.date, dates: reference.dates, times: merged.times, courts: merged.courts,
+      cached: reference.cached || merged.cached, partial: reference.partial,
+      rooms: merged.rooms.map((room) => Object.fromEntries(['WID', 'CDMC', 'CGBM', 'CQBM', 'XMDM', 'XQDM']
+        .filter((field) => room[field] !== undefined).map((field) => [field, room[field]]))) };
+    signal?.throwIfAborted(); store.state.catalogs[key] = catalog; await store.save();
     return catalog;
   } finally { await client.flush(); }
 }

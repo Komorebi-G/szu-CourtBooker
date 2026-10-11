@@ -1,2 +1,93 @@
-body{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);-webkit-tap-highlight-color:transparent}main{max-width:700px;margin:auto;padding:24px 16px 155px}h1{font-size:27px;letter-spacing:-.7px}.mobile-head{display:flex;align-items:center;gap:10px;padding:15px 18px;border-bottom:1px solid var(--line);background:white}.mobile-head p{font-size:11px;color:var(--muted)}.mobile-head>.project-tag{margin-left:auto}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}.section-head button{white-space:nowrap}.explain{font-size:13px;color:var(--muted);margin-bottom:22px}.bottom-tabs{position:fixed;bottom:0;left:0;right:0;padding:8px 14px calc(8px + env(safe-area-inset-bottom));display:flex;background:white;border-top:1px solid var(--line);z-index:3}.bottom-tabs button{flex:1;border:0;background:transparent;color:var(--muted);font-weight:600}.bottom-tabs button[aria-current=page]{background:var(--soft);color:var(--green)}.batch-bar{position:fixed;bottom:calc(66px + env(safe-area-inset-bottom));left:14px;right:14px;max-width:670px;margin:auto;background:#fff;border:1px solid var(--line);box-shadow:0 5px 20px #172d2510;border-radius:12px;padding:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;z-index:2}.batch-bar span{font-size:13px;color:var(--muted)}.task-card{padding:17px}.plan-select{display:flex;align-items:flex-start;gap:10px;min-width:0}.plan-select input{margin-top:5px}.plan-select>div{min-width:0}.task-head h3{overflow-wrap:anywhere}.task-actions{justify-content:flex-start}.task-content{display:block;margin:12px 0}.task-content p{margin-top:8px}.advanced{margin-top:20px}.advanced>.form-grid{margin-top:12px}.run-choice{display:flex;align-items:flex-start;gap:10px;margin:20px 0}.run-choice input{width:18px;min-width:18px;margin-top:5px;accent-color:var(--green)}.run-choice small{display:block;color:var(--muted);font-size:12px;margin-top:4px}.run-result{padding:9px 0;border-bottom:1px solid var(--line);font-size:13px;overflow-wrap:anywhere}.run-meta{color:var(--muted);font-size:12px}.run-logs{font:12px/1.7 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;background:var(--bg);padding:10px;border-radius:8px;margin-top:10px}.schedule-note{display:block;margin-bottom:18px;white-space:pre-line}.schedule-note b{display:block}dialog{width:min(600px,calc(100% - 20px));max-height:calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px)}.dialog-body{padding-bottom:28px}.court-list{grid-template-columns:repeat(2,minmax(0,1fr))}.toast{bottom:155px;z-index:20}#accountForm input{margin:8px 0}#exportText{font:12px/1.6 Consolas,monospace}#confirmPlans{font-size:13px;white-space:pre-line}.plan-timing{color:var(--muted);font-size:12px;margin-top:10px}.status-error{color:var(--red)}input,select,textarea{font-size:16px}button{min-height:44px}.offline-badge{color:var(--red)}
-.open-source-note{margin:-10px 0 22px;padding:12px 14px;border:1px solid #c6decf;border-radius:10px;background:var(--soft);font-size:13px;line-height:1.5}.open-source-note a{color:var(--green);font-weight:700;overflow-wrap:anywhere}
+/* Mobile layout; the shared primitives come from base.css. */
+body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); -webkit-tap-highlight-color: transparent; }
+main { max-width: 700px; margin: auto; padding: 24px 16px calc(148px + env(safe-area-inset-bottom)); }
+input, select, textarea { font-size: 16px; }
+button { min-height: 44px; }
+h1 { font-size: 25px; letter-spacing: -.5px; font-weight: 650; }
+.mobile-head { display: flex; align-items: center; gap: 10px; padding: 13px 18px; border-bottom: 1px solid var(--line); background: white; }
+.mobile-head b { font-size: 14px; }
+.mobile-head > .project-tag { margin-left: auto; font-size: 10px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.section-head > button { white-space: nowrap; font-size: 12px; }
+.explain { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+.mobile-overview { background: white; border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+.mobile-overview h2 { font-size: 19px; line-height: 1.5; overflow-wrap: anywhere; }
+.mobile-overview > p { color: var(--muted); font-size: 13px; margin-top: 6px; line-height: 1.65; }
+.mobile-overview button { margin-top: 18px; font-size: 13px; padding: 10px 18px; }
+.setup-steps { display: flex; gap: 12px; padding: 0 0 22px; margin: 0 0 20px; list-style: none; border-bottom: 1px solid var(--line); }
+.setup-steps li { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.setup-steps li span { display: grid; place-items: center; width: 26px; height: 26px; background: #f1f3f7; border-radius: 50%; font-size: 12px; font-weight: 600; }
+.setup-steps li.current { color: var(--green); font-weight: 600; }
+.setup-steps li.current span { background: var(--green); color: white; }
+.setup-steps li.done span { background: #e9eefb; color: var(--green); }
+.search-box { max-width: none; margin: 0 0 10px; }
+.search-box input { font-size: 13px; min-height: 42px; }
+.list-tools { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 14px; }
+.filter-tabs { gap: 2px; }
+.filter-tabs button { font-size: 12px; min-height: 40px; padding: 6px 11px; }
+.list-count { font-size: 11px; }
+.task-card { padding: 16px; }
+.task-head { gap: 8px; }
+.task-head h3 { font-size: 16px; overflow-wrap: anywhere; line-height: 1.45; }
+.plan-select { display: flex; align-items: flex-start; gap: 9px; min-width: 0; }
+.plan-select input { margin: 4px 0 0; width: 18px; min-width: 18px; height: 18px; }
+.plan-select > div { min-width: 0; }
+.plan-title-row { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+.plan-select .project-tag { font-size: 10px; padding: 2px 6px; }
+.task-date { font-size: 11px; }
+.task-head > .badge { font-size: 11px; max-width: 90px; }
+.task-content { display: block; margin: 12px 0 4px; }
+.task-content .plan-brief { margin-top: 8px; }
+.chip { font-size: 12px; padding: 3px 7px; }
+.plan-brief { font-size: 12px; }
+.plan-details { margin-bottom: 9px; }
+.plan-details > summary { min-height: 32px; display: inline-flex; align-items: center; }
+.next-hint { font-size: 12px; }
+.task-actions { border-top: 1px solid #eef0f4; margin-top: 10px; padding-top: 10px; justify-content: flex-start; gap: 4px; }
+.task-actions button { min-height: 42px; font-size: 12px; }
+.task-actions .plan-primary { margin-left: auto; padding: 8px 13px; }
+.more-actions > summary { width: 44px; min-height: 44px; }
+.more-actions > div { left: 0; right: auto; width: 184px; }
+.more-actions.align-end > div { left: auto; right: 0; }
+.batch-bar { position: fixed; bottom: calc(67px + env(safe-area-inset-bottom)); left: 14px; right: 14px; max-width: 672px; margin: auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: white; box-shadow: 0 3px 16px #22335015; z-index: 3; }
+.batch-bar span { font-size: 12px; color: var(--muted); }
+.batch-bar button { min-height: 40px; font-size: 12px; }
+.bottom-tabs { position: fixed; bottom: 0; left: 0; right: 0; display: flex; background: white; border-top: 1px solid var(--line); padding: 5px 14px calc(7px + env(safe-area-inset-bottom)); z-index: 3; }
+.bottom-tabs button { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; background: none; color: var(--muted); min-height: 48px; font-size: 12px; font-weight: 600; }
+.bottom-tabs button[aria-current=page] { color: var(--green); }
+.bottom-tabs button > span { font-size: 19px; font-weight: 400; }
+.bottom-tabs i { font-style: normal; background: #b97546; color: white; min-width: 15px; height: 15px; line-height: 15px; font-size: 10px; border-radius: 8px; }
+.schedule-note { padding: 13px 15px; background: var(--soft); border-radius: 9px; color: #3c5886; white-space: pre-line; margin-bottom: 16px; font-size: 12px; }
+.run-result { padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--success); overflow-wrap: anywhere; }
+.run-meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.run-logs { font: 12px/1.7 Consolas,monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; background: #f7f9fc; padding: 10px; border-radius: 7px; margin-top: 8px; }
+#runs .task-card > details { font-size: 12px; margin-top: 12px; }
+#runs .task-card > a { display: inline-block; font-size: 12px; margin: 9px 0; }
+.advanced { margin-top: 16px; font-size: 12px; }
+.advanced > .form-grid { margin-top: 10px; }
+.run-choice { display: flex; align-items: flex-start; gap: 10px; margin: 16px 0; }
+.run-choice input { width: 18px; min-width: 18px; margin-top: 5px; accent-color: var(--green); }
+.run-choice small { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+dialog { width: min(600px,calc(100% - 20px)); max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px); }
+.dialog-head h2 { font-size: 18px; }
+.dialog-body { padding-bottom: 22px; }
+.form-grid input, .form-grid select { font-size: 16px; }
+.manual-time input { width: 100px; }
+.court-list { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.time-option { min-height: 44px; }
+.check-label { padding: 9px 0; }
+.hint { color: var(--muted); font-size: 12px; margin: 10px 0; }
+#accountForm input { margin: 7px 0; }
+#exportText { font: 12px/1.6 Consolas,monospace; }
+#confirmPlans { font-size: 13px; white-space: pre-line; }
+.toast { bottom: calc(145px + env(safe-area-inset-bottom)); }
+.status-error, .offline-badge { color: var(--red); }
+@media (max-width: 360px) {
+  main { padding-left: 12px; padding-right: 12px; }
+  .task-card { padding: 14px; }
+  .filter-tabs button { padding: 6px 8px; }
+  .section-head h1 { font-size: 24px; }
+  .mobile-overview { padding: 18px; }
+  .setup-steps { gap: 8px; }
+}
+body:has(#batchBar[hidden]) main { padding-bottom: calc(85px + env(safe-area-inset-bottom)); }

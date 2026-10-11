@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
-import { addDays, shanghaiDate } from '../../shared/utils.js';
 const uiUrl = process.argv[2];
 if (!uiUrl || !['localhost', '127.0.0.1'].includes(new URL(uiUrl).hostname)) throw new Error('请传入已启动的本地手机界面 URL');
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9334');
 const ownedPages = new Set();
-const context = browser.contexts()[0];
+const context = await browser.newContext();
 const checks = [];
 const errors = [];
 const metadata = { campusList: [{ XQDM: '1', XQDM_DISPLAY: '粤海校区' }], xmList: [{ XQDM: '1', XMDM: '001', XMMC: '羽毛球', DCFS: '1.0' }], packageVenueList: [{ SSXQ: '1', XM: '001', CGBM: 'v', CGMC: '运动广场东馆羽毛球场' }] };
@@ -13,6 +12,10 @@ async function scenario(mode) {
   const page = await context.newPage(); ownedPages.add(page);
   await page.setViewportSize({ width: 390, height: 844 });
   page.on('pageerror', (e) => errors.push(e.message));
+  const fixedDate = '2026-10-02';
+  const fixedNow = new Date(`2026-10-01T${mode === 'wait' ? '12:00' : '13:00'}:00+08:00`);
+  await page.clock.install({ time: fixedNow });
+  await page.clock.setSystemTime(fixedNow);
   // Only localhost UI assets are permitted. No real school traffic or credentials.
   await page.route('**/*', (route) => new URL(route.request().url()).origin === new URL(uiUrl).origin ? route.continue() : route.abort());
   await page.addInitScript(({ mode, metadata, date }) => {
@@ -42,6 +45,7 @@ async function scenario(mode) {
         const path = new URL(options.url).pathname;
         let body;
         if (path.endsWith('/index.do')) body = "USERID='A';USER_INFO={\"userName\":\"测试同学\"};APP_TITLE=";
+        else if (path.endsWith('/myBookingInfo.do')) body = JSON.stringify({ code: '0', datas: { myBookingInfo: { rows: [], totalSize: 0 } } });
         else if (path.endsWith('/getSportVenueData.do')) body = JSON.stringify(metadata);
         else if (path.endsWith('/getOpeningRoom.do')) body = JSON.stringify({ code: '0', datas: { getOpeningRoom: { rows: [{ WID: 'other', CDMC: '2号场', CGBM: 'v', XMDM: '001', XQDM: '1' }, { WID: 'court', CDMC: '1号场', CGBM: 'v', XMDM: '001', XQDM: '1' }] } } });
         else if (path.endsWith('/insertVenueBookingInfo.do')) body = mode === 'malformed' ? '{}' : mode === 'priority' && new URLSearchParams(options.body).get('CDWID') === 'court' ? JSON.stringify({ code: '1', msg: '满场' }) : JSON.stringify({ code: '0', data: { DHID: 'simulated-order' } });
@@ -49,11 +53,11 @@ async function scenario(mode) {
         return { status: 200, headers: {}, body };
       },
     };
-  }, { mode, metadata, date: addDays(shanghaiDate(), 2) });
+  }, { mode, metadata, date: fixedDate });
   await page.goto(uiUrl);
   await page.getByRole('button', { name: '＋ 新建', exact: true }).click();
   await page.locator('#planName').fill('深查模拟方案');
-  await page.locator('#planDate').selectOption(addDays(shanghaiDate(), 2));
+  await page.locator('#planDate').selectOption(fixedDate);
   await page.getByText('手动添加时段', { exact: true }).click();
   await page.locator('#timeStart').fill('15:00'); await page.locator('#timeEnd').fill('16:00');
   await page.getByRole('button', { name: '添加', exact: true }).click();
@@ -97,9 +101,16 @@ async function scenario(mode) {
     if (mode === 'malformed') assert.ok(run.inFlight);
     await page.screenshot({ path: `output/playwright/deep-${mode}.png`, fullPage: true });
     await page.getByRole('button', { name: '方案', exact: true }).click();
-    const dialog = page.waitForEvent('dialog').then(async (warning) => { assert.match(warning.message(), /核对/); await warning.dismiss(); });
-    await page.getByRole('button', { name: '执行所选', exact: true }).click();
-    await dialog;
+    const primary = page.locator('#plans .plan-primary');
+    assert.equal(await primary.textContent(), mode === 'malformed' ? '核对与重试' : '查看结果');
+    assert.equal(await page.locator('[data-select]').isDisabled(), true);
+    await page.locator('#plans .more-actions summary').click();
+    await page.getByRole('button', { name: '再约一次', exact: true }).click();
+    assert.equal(await page.locator('#planDate').inputValue(), fixedDate);
+    assert.equal(await page.evaluate(() => audit.state.runs.length), 1);
+    assert.equal(await page.locator('#plans .more-actions[open]').count(), 0, '复用打开弹窗后收起背景菜单');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#planDialog').evaluate((d) => d.open), false, '一次 Esc 关闭复用编辑器');
     assert.equal(await page.locator('#confirmDialog').evaluate((el) => el.open), false);
   }
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -109,9 +120,9 @@ try {
   for (const mode of ['wait', 'success', 'malformed', 'storagefail', 'priority']) await scenario(mode);
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ checks, pageErrors: errors, realSchoolRequests: 0 }));
-  process.exit(0);
+  await context.close(); await browser.close();
 } catch (error) {
   console.error(error);
   await Promise.allSettled([...ownedPages].map((page) => page.close()));
-  process.exit(1);
+  await context.close(); await browser.close(); process.exitCode = 1;
 }

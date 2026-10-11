@@ -3,7 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { chromium } from 'playwright-core';
 import { APP_URL, BASE_URL, DEFAULT_SESSION_FILE } from '../../shared/constants.js';
+import { browserCdpPort } from '../../shared/browser-port.js';
 import { parseSessionText } from '../../shared/session-format.js';
+import { RequestNotSentError } from '../../shared/errors.js';
 
 const saveQueues = new Map();
 
@@ -25,13 +27,42 @@ async function writeSession(session, absolute) {
   }
 }
 
-function sessionTransaction(path, operation) {
+function sessionTransaction(path, operation, { priority = 'normal', signal, cancellable = false } = {}) {
+  if (signal?.aborted) return Promise.reject(new RequestNotSentError('本次操作已停止，未发送请求'));
   const absolute = resolve(path);
-  const previous = saveQueues.get(absolute) ?? Promise.resolve();
-  const pending = previous.catch(() => {}).then(() => operation(absolute));
-  saveQueues.set(absolute, pending);
-  return pending.finally(() => {
-    if (saveQueues.get(absolute) === pending) saveQueues.delete(absolute);
+  let queue = saveQueues.get(absolute);
+  if (!queue) { queue = { waiting: [], active: null }; saveQueues.set(absolute, queue); }
+  return new Promise((resolveWork, rejectWork) => {
+    const controller = new AbortController();
+    const entry = { operation, priority, cancellable, controller, resolveWork, rejectWork };
+    const abort = () => {
+      controller.abort(signal?.reason);
+      const index = queue.waiting.indexOf(entry);
+      if (index >= 0) {
+        queue.waiting.splice(index, 1);
+        signal?.removeEventListener('abort', abort);
+        rejectWork(new RequestNotSentError('本次操作已停止，未发送请求'));
+      }
+    };
+    entry.cleanup = () => signal?.removeEventListener('abort', abort);
+    if (signal?.aborted) { rejectWork(new RequestNotSentError('本次操作已停止，未发送请求')); return; }
+    signal?.addEventListener('abort', abort, { once: true });
+    queue.waiting.push(entry);
+    // A directory/verification read may yield, but a sent booking or an atomic
+    // cookie write must always finish before the next transaction starts.
+    if (priority === 'critical' && queue.active?.priority === 'background' && queue.active.cancellable) {
+      queue.active.controller.abort(new DOMException('预约执行优先，已取消后台查询', 'AbortError'));
+    }
+    const pump = () => {
+      if (queue.active) return;
+      if (!queue.waiting.length) { if (saveQueues.get(absolute) === queue) saveQueues.delete(absolute); return; }
+      const critical = queue.waiting.findIndex((item) => item.priority === 'critical');
+      const next = queue.waiting.splice(critical >= 0 ? critical : 0, 1)[0];
+      queue.active = next;
+      Promise.resolve().then(() => next.operation(absolute, next.controller.signal)).then(next.resolveWork, next.rejectWork)
+        .finally(() => { next.cleanup(); queue.active = null; pump(); });
+    };
+    pump();
   });
 }
 
@@ -42,9 +73,9 @@ export function saveSession(session, path = DEFAULT_SESSION_FILE) {
 
 // Requests and imports share one per-file queue. A response's refreshed cookies
 // must be durable before another client reads and sends this account's session.
-export function withSession(path, operation) {
-  return sessionTransaction(path, async (absolute) => operation(await loadSession(absolute),
-    (session) => writeSession(session, absolute)));
+export function withSession(path, operation, options) {
+  return sessionTransaction(path, async (absolute, signal) => operation(await loadSession(absolute),
+    (session) => writeSession(session, absolute), signal), options);
 }
 
 export async function loadSession(path = DEFAULT_SESSION_FILE) {
@@ -64,8 +95,8 @@ export async function loadSession(path = DEFAULT_SESSION_FILE) {
   return session;
 }
 
-export async function importSessionFromCdp(path = DEFAULT_SESSION_FILE) {
-  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${process.platform === 'win32' ? 9335 : 9334}`);
+export async function importSessionFromCdp(path = DEFAULT_SESSION_FILE, port = browserCdpPort()) {
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
   try {
     const context = browser.contexts()[0];
     if (!context) throw new Error('浏览器中没有可用的上下文');
@@ -92,6 +123,7 @@ export async function importSessionFromCdp(path = DEFAULT_SESSION_FILE) {
       version: 1,
       savedAt: new Date().toISOString(),
       source: 'browser-cdp',
+      browserCdpPort: port,
       userAgent: await page.evaluate(() => navigator.userAgent),
       cookies,
     };

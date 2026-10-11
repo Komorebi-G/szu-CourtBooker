@@ -100,4 +100,61 @@ public class CourtHttpTest {
         assertEquals(503, http.execute(request("index.do", false), () -> {}).status);
         assertEquals(1, server.getRequestCount());
     }
+    @Test(timeout = 3000) public void preparationUsesShortTimeoutAndChecksBeforeRetry() {
+        server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+        AtomicInteger checks = new AtomicInteger();
+        long started = System.nanoTime();
+        assertThrows(CourtExecutionGate.NotSent.class, () -> http.execute(request("index.do", false), () -> {
+            if (checks.incrementAndGet() > 1) throw new CourtExecutionGate.NotSent("preparation window ended");
+        }, 80L));
+        assertEquals(1, server.getRequestCount());
+        assertTrue("Preparation must not occupy the normal 1s request window",
+            TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 800);
+    }
+    @Test(timeout = 3000) public void queryRetrySharesPreparationDeadline() {
+        server.enqueue(broken().setHeadersDelay(180, TimeUnit.MILLISECONDS));
+        server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+        long deadline = System.currentTimeMillis() + 500;
+        long started = System.nanoTime();
+        assertThrows(IOException.class, () -> http.execute(request("index.do", false), () -> {}, 1200L, deadline));
+        assertEquals(2, server.getRequestCount());
+        assertTrue("The retry must finish within the preparation budget",
+            TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 900);
+    }
+    @Test public void sentBookingRetainsResponseBeyondExecutionDeadline() throws Exception {
+        server.enqueue(new MockResponse().setBody("accepted").setBodyDelay(120, TimeUnit.MILLISECONDS));
+        assertEquals("accepted", http.execute(request("sportVenue/insertVenueBookingInfo.do", true), () -> {},
+            1000L, System.currentTimeMillis() + 30).body);
+        assertEquals(1, server.getRequestCount());
+    }
+    @Test(timeout = 3000) public void cancelInFlightReadClosesCallAndCannotRetry() throws Exception {
+        server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+        CourtRequestCancellation cancellation = new CourtRequestCancellation();
+        java.util.concurrent.CompletableFuture<CourtHttp.Result> pending = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+            try { return http.execute(request("index.do", false), () -> {}, 1000L, null, cancellation, () -> {}); }
+            catch (Exception error) { throw new java.util.concurrent.CompletionException(error); }
+        });
+        assertNotNull(server.takeRequest(1, TimeUnit.SECONDS)); cancellation.cancel();
+        java.util.concurrent.ExecutionException error = assertThrows(java.util.concurrent.ExecutionException.class,
+            () -> pending.get(1, TimeUnit.SECONDS));
+        assertTrue(error.getCause() instanceof CourtExecutionGate.NotSent); assertEquals(1, server.getRequestCount());
+    }
+    @Test public void cancelledReadHandleCannotCancelSentMutation() throws Exception {
+        server.enqueue(new MockResponse().setBody("accepted")); CourtRequestCancellation cancellation = new CourtRequestCancellation();
+        cancellation.cancel();
+        assertEquals("accepted", http.execute(request("sportVenue/insertVenueBookingInfo.do", true), () -> {},
+            1000L, null, cancellation, () -> {}).body);
+        assertEquals(1, server.getRequestCount());
+    }
+    @Test public void failedDurableDispatchMarkerPreventsMutation() {
+        assertThrows(CourtExecutionGate.NotSent.class, () -> http.execute(request("sportVenue/insertVenueBookingInfo.do", true), () -> {},
+            1000L, null, null, () -> { throw new CourtExecutionGate.NotSent("disk full"); }));
+        assertEquals(0, server.getRequestCount());
+    }
+    @Test public void stopDuringDurableMarkerPreventsDispatch() {
+        CourtExecutionGate gate = new CourtExecutionGate(); gate.enable("run");
+        assertThrows(CourtExecutionGate.NotSent.class, () -> http.execute(request("sportVenue/insertVenueBookingInfo.do", true),
+            () -> gate.check("run", null, 0), 1000L, null, null, () -> gate.disable("run")));
+        assertEquals(0, server.getRequestCount());
+    }
 }

@@ -1,20 +1,31 @@
-import { mkdir, readFile, writeFile, rename, readdir, access, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, readdir, access, rm, stat, open } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
-import { validateExecutionStart } from '../../shared/runner.js';
+import { join, dirname } from 'node:path';
+import { executionIntent } from '../../shared/runner.js';
+import { isProcessOwnerAsync, processOwner } from './process-owner.js';
+import { pendingExecutionRequests } from '../../shared/experience.js';
 
 export const JOB_ACTIVE = ['scheduled', 'queued', 'preparing', 'checking', 'waiting', 'booking', 'stopping'];
-export async function writeJson(path, value) {
+export async function writeJson(path, value, { durable = false } = {}) {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 });
+    if (durable) {
+      const file = await open(temporary, 'wx', 0o600);
+      try { await file.writeFile(JSON.stringify(value, null, 2)); await file.sync(); }
+      finally { await file.close(); }
+    } else await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 });
     await rename(temporary, path);
+    if (durable && process.platform !== 'win32') {
+      const directory = await open(dirname(path), 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
   } finally { await rm(temporary, { force: true }).catch(() => {}); }
 }
 export const readJson = async (path) => JSON.parse(await readFile(path, 'utf8'));
 export const exists = async (path) => access(path).then(() => true, () => false);
 
 export class JobStore {
+  summaryCache = new Map();
   constructor({ dataDir, root, worker, sessionPath, scheduler, startJob, execution }) {
     Object.assign(this, { dataDir, root, worker, sessionPath, scheduler, startJob, execution });
   }
@@ -22,16 +33,37 @@ export class JobStore {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error('任务记录编号无效');
     return join(this.dataDir, 'jobs', id);
   }
-  async get(id) {
+  async get(id, { summary = false } = {}) {
     const dir = this.path(id);
-    const job = await readJson(join(dir, 'job.json'));
+    const paths = ['job.json', 'state.json', 'dispatch.json'].map((file) => join(dir, file));
+    let job, state;
     const failure = this.execution?.failures.get(dir);
-    const state = failure?.executionState ? structuredClone(failure.executionState) : await readJson(join(dir, 'state.json'));
+    if (summary && !failure?.executionState) {
+      const stats = await Promise.all(paths.map((path) => stat(path).catch((error) => { if (error.code === 'ENOENT' && path === paths[2]) return null; throw error; })));
+      const signature = stats.map((value) => value ? `${value.ino}:${value.size}:${value.mtimeMs}:${value.ctimeMs}` : '-').join('|');
+      let cached = this.summaryCache.get(id);
+      if (cached?.signature !== signature) {
+        [job, state] = await Promise.all(paths.slice(0, 2).map(readJson));
+        const dispatch = stats[2] ? await readJson(paths[2]).catch((error) => { if (error.code === 'ENOENT') return {}; throw error; }) : {};
+        state.pendingRequests = mergedRequests(state, dispatch);
+        state.dispatchJournalChecked = true;
+        cached = { signature, job, state: compactState(state) }; this.summaryCache.set(id, cached);
+      }
+      job = cached.job; state = { ...cached.state };
+    } else {
+      job = await readJson(paths[0]);
+      state = failure?.executionState ? (summary ? compactState(failure.executionState) : structuredClone(failure.executionState)) : await readJson(paths[1]);
+      if (!failure?.executionState) {
+        const dispatch = await readJson(paths[2]).catch((error) => { if (error.code === 'ENOENT') return {}; throw error; });
+        state.pendingRequests = mergedRequests(state, dispatch);
+        state.dispatchJournalChecked = true;
+      }
+      if (summary) state = compactState(state);
+    }
     const stopped = await exists(join(dir, 'stop'));
     if (stopped && JOB_ACTIVE.includes(state.status)) state.status = state.pid ? 'stopping' : 'stopped';
     if (state.pid && JOB_ACTIVE.includes(state.status)) {
-      let alive = true;
-      try { process.kill(state.pid, 0); } catch (error) { if (error.code === 'ESRCH') alive = false; }
+      let alive = await isProcessOwnerAsync({ pid: state.pid, identity: state.processIdentity, startedAt: state.startedAt ?? job.createdAt });
       if (state.pid === process.pid && this.execution && !this.execution.active.has(dir)) alive = false;
       if (!alive) {
         state.status = stopped ? 'stopped' : 'interrupted';
@@ -39,23 +71,87 @@ export class JobStore {
       }
     }
     return { id, mode: job.mode, taskId: job.taskId, releaseAt: job.releaseAt, createdAt: job.createdAt,
-      accountId: job.accountId ?? 'default', accountName: job.accountName ?? '我的账号', target: job.config.targets[0], ...state };
+      accountId: job.accountId ?? 'default', accountIdentityId: job.accountIdentityId,
+      accountName: job.accountName ?? '我的账号', target: job.config.targets[0], ...state };
   }
-  async list() {
+  async list(options = {}) {
     const ids = await readdir(join(this.dataDir, 'jobs')).catch((error) => {
       if (error.code === 'ENOENT') return [];
       throw error;
     });
-    return Promise.all(ids.filter((id) => /^[a-f0-9-]{36}$/.test(id)).map((id) => this.inspect(id)));
+    const validIds = ids.filter((id) => /^[a-f0-9-]{36}$/.test(id));
+    for (const id of this.summaryCache.keys()) if (!validIds.includes(id)) this.summaryCache.delete(id);
+    return Promise.all(validIds.map((id) => this.inspect(id, options)));
   }
-  async inspect(id) {
-    try { return await this.get(id); }
+  async inspect(id, options) {
+    try { return await this.get(id, options); }
     catch (error) {
       const job = await readJson(join(this.path(id), 'job.json')).catch(() => ({}));
       return { id, mode: job?.mode, taskId: job?.taskId, createdAt: job?.createdAt ?? new Date(0).toISOString(),
-        status: 'corrupt', successes: [], logs: [],
+        accountId: job?.accountId ?? 'default', accountIdentityId: job?.accountIdentityId,
+        accountName: job?.accountName ?? '我的账号', target: job?.config?.targets?.[0],
+        status: 'corrupt', requiresReview: true, successes: [], logs: [],
         error: `本地执行记录无法读取（${error.code ?? '格式异常'}），原文件已保留；请先核对学校预约` };
     }
+  }
+  async recordReview(id, { checkedAt = new Date().toISOString(), resolvedRequests = [], reviewedOutcome, acknowledgeCorrupt = false } = {}) {
+    const dir = this.path(id);
+    if (this.execution?.active.has(dir)) throw new Error('执行仍在运行，请停止并等待请求返回后再核对');
+    const lock = await readFile(join(dir, 'run.lock'), 'utf8').catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+    if (lock !== null && (await isProcessOwnerAsync(lock, { startedAt: (await stat(join(dir, 'run.lock'))).mtimeMs })
+      || (!Number(lock.split('\n')[0]) && Date.now() - (await stat(join(dir, 'run.lock'))).mtimeMs < 10000))) {
+      throw new Error('执行锁尚未释放，请停止正在运行的助手并等待请求返回后再核对');
+    }
+    let state, dispatch;
+    const preserved = [];
+    const readReviewRecord = async (file, optional = false) => {
+      try { return await readJson(join(dir, file)); }
+      catch (error) {
+        if (optional && error.code === 'ENOENT') return {};
+        if (!acknowledgeCorrupt) throw error;
+        const original = await readFile(join(dir, file)).catch((readError) => { if (readError.code === 'ENOENT') return null; throw readError; });
+        if (original !== null) {
+          const backup = `${file}.corrupt-${randomUUID()}`;
+          await writeFile(join(dir, backup), original, { flag: 'wx', mode: 0o600 }); preserved.push(backup);
+        }
+        return {};
+      }
+    };
+    state = await readReviewRecord('state.json'); dispatch = await readReviewRecord('dispatch.json', true);
+    if (acknowledgeCorrupt) {
+      state = { status: 'interrupted', logs: [], successes: [], ...state, requiresReview: false,
+        recoveredAt: checkedAt, recovery: { ...(state.recovery ?? {}), checkedAt, preservedFiles: preserved } };
+    }
+    state.pendingRequests = mergedRequests(state, dispatch);
+    state.reviewedRequests ??= {};
+    const ids = resolvedRequests.map((value) => typeof value === 'string' ? value : value.requestId);
+    for (let index = 0; index < ids.length; index++) {
+      const requestId = ids[index], original = state.pendingRequests[requestId];
+      if (original) {
+        state.reviewedRequests[requestId] = { ...original, checkedAt,
+          review: typeof resolvedRequests[index] === 'object' ? resolvedRequests[index] : { requestId } };
+        delete state.pendingRequests[requestId];
+      }
+      if (state.inFlight && (state.inFlight.requestId === requestId || requestId === `${state.inFlight.date}|${state.inFlight.time}`)) {
+        state.reviewedRequests[requestId] ??= { ...state.inFlight, checkedAt };
+        delete state.inFlight;
+      }
+    }
+    state.reviewedAt = checkedAt;
+    if (reviewedOutcome) state.reviewedOutcome = reviewedOutcome;
+    if (reviewedOutcome && !Object.keys(state.pendingRequests).length && !state.inFlight) {
+      state.statusBeforeReview ??= state.status; state.status = reviewedOutcome;
+      state.errorBeforeReview ??= state.error; delete state.error;
+    }
+    await writeJson(join(dir, 'state.json'), state, { durable: true });
+    const markerRequests = { ...dispatch.pendingRequests };
+    for (const requestId of ids) delete markerRequests[requestId];
+    if (Object.keys(markerRequests).length) await writeJson(join(dir, 'dispatch.json'), { pendingRequests: markerRequests }, { durable: true });
+    else await rm(join(dir, 'dispatch.json'), { force: true });
+    const failure = this.execution?.failures.get(dir);
+    if (failure?.executionState) failure.executionState = structuredClone(state);
+    this.summaryCache.delete(id);
+    return this.get(id);
   }
   async retireSchedules() {
     const errors = [];
@@ -71,7 +167,8 @@ export class JobStore {
     return errors;
   }
   async create(target, config, mode, account = {}) {
-    const releaseAt = validateExecutionStart(mode, target.date);
+    const intent = executionIntent(mode, target.date, { confirmedAt: account.confirmedAt, durationMs: target.durationMs ?? 60000 });
+    const releaseAt = intent.releaseAt; mode = intent.mode;
     if (!this.startJob) throw new Error('请在预约助手内手动启动本次执行');
     const id = randomUUID();
     const dir = this.path(id);
@@ -83,7 +180,7 @@ export class JobStore {
           pollJitterMs: 0, timeoutMs: target.durationMs ?? 60_000 },
         targets: [{ ...target, enabled: true }] } };
     await writeJson(join(dir, 'job.json'), job);
-    await writeJson(join(dir, 'state.json'), { status: 'queued', pid: process.pid, logs: [], successes: [] });
+    await writeJson(join(dir, 'state.json'), { status: 'queued', pid: process.pid, processIdentity: processOwner.identity, logs: [], successes: [] });
     try {
       this.startJob(dir);
     } catch (error) {
@@ -104,17 +201,15 @@ export class JobStore {
   async remove(id) {
     const job = await this.stop(id);
     if (this.execution?.active.has(this.path(id)) || JOB_ACTIVE.includes(job.status)) throw new Error('正在等待已发出的请求返回，请稍后删除');
+    if (pendingExecutionRequests(job).length) throw new Error('此执行还有预约结果待确认，请先核对学校预约并确认结果后再删除');
+    if (job.requiresReview) throw new Error('此执行记录损坏，请先核对学校预约并确认结果后再删除');
     if (job.status === 'corrupt') {
       const lock = await readFile(join(this.path(id), 'run.lock'), 'utf8').catch((error) => {
         if (error.code === 'ENOENT') return null;
         throw error;
       });
       if (lock !== null) {
-        const pid = Number(lock);
-        let alive = true;
-        if (Number.isSafeInteger(pid) && pid > 0) {
-          try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') alive = false; }
-        }
+        const alive = await isProcessOwnerAsync(lock, { startedAt: (await stat(join(this.path(id), 'run.lock'))).mtimeMs });
         if (alive) throw new Error('记录损坏且执行锁尚未释放，请先停止正在运行的助手');
       }
     }
@@ -122,4 +217,16 @@ export class JobStore {
     await mkdir(trash, { recursive: true, mode: 0o700 });
     await rename(this.path(id), join(trash, id));
   }
+}
+
+function compactState(state) {
+  const { logs, diagnostics, reviewedRequests, completedRequests, ...summary } = state;
+  return { ...summary, logCount: logs?.length ?? state.logCount ?? 0, lastEvent: logs?.at(-1) ? {
+    at: logs.at(-1).at, level: logs.at(-1).level, message: logs.at(-1).message } : state.lastEvent };
+}
+
+function mergedRequests(state, dispatch) {
+  return Object.fromEntries(Object.entries({ ...state.pendingRequests, ...dispatch.pendingRequests })
+    .filter(([id, request]) => !state.reviewedRequests?.[id]
+      && !(request.attemptId && state.completedRequests?.[id]?.attemptId === request.attemptId)));
 }

@@ -3,11 +3,10 @@ package cn.szucourt.booker;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.SslErrorHandler;
@@ -30,18 +29,13 @@ import androidx.core.view.WindowInsetsCompat;
 public class SchoolLoginActivity extends AppCompatActivity {
     private static final String APP_URL = "https://ehall.szu.edu.cn/qljfwapp/sys/lwSzuCgyy/index.do#/sportVenue";
     private static final String COOKIE_URL = "https://ehall.szu.edu.cn/qljfwapp/sys/lwSzuCgyy/modules/sportVenue/getOpeningRoom.do";
-    private final Handler handler = new Handler(Looper.getMainLooper());
     private WebView browser;
     private TextView status;
     private Button retry;
     private boolean completed;
     private boolean resumed;
     private boolean clearing;
-    private final Runnable poll = new Runnable() {
-        @Override public void run() {
-            if (!completed && resumed) { capture(false); handler.postDelayed(this, 1000); }
-        }
-    };
+    private boolean pageLoaded;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -77,6 +71,7 @@ public class SchoolLoginActivity extends AppCompatActivity {
         CookieManager.getInstance().setAcceptThirdPartyCookies(browser, true);
         browser.setWebChromeClient(new WebChromeClient());
         browser.setWebViewClient(new WebViewClient() {
+            @Override public void onPageStarted(WebView view, String url, Bitmap favicon) { pageLoaded = false; }
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 return !allowNavigation(request.getUrl());
             }
@@ -86,11 +81,11 @@ public class SchoolLoginActivity extends AppCompatActivity {
             @Override public void onPageFinished(WebView view, String url) {
                 if (completed || clearing) return;
                 Uri uri = Uri.parse(url);
-                if (trusted(uri)) status.setText("学校页面：" + uri.getHost() + "\n请完成登录，进入场馆页面后自动识别；不要提交预约。");
-                capture(false);
+                pageLoaded = trusted(uri);
+                if (trusted(uri)) status.setText("学校页面：" + uri.getHost() + "\n请核对当前登录账号，进入场馆页面后点击“完成登录”；不要提交预约。");
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) status.setText("页面加载失败，请检查网络后点击“换号 / 重试”，或返回使用登录 JSON 导入。");
+                if (request.isForMainFrame()) { pageLoaded = false; status.setText("页面加载失败，请检查网络后点击“换号 / 重试”，或返回使用登录 JSON 导入。"); }
             }
             @Override public void onReceivedSslError(WebView view, SslErrorHandler sslHandler, SslError error) {
                 sslHandler.cancel(); status.setText("学校页面证书校验失败，已停止加载。请检查手机时间和网络。");
@@ -117,7 +112,7 @@ public class SchoolLoginActivity extends AppCompatActivity {
     }
     private void startFresh() {
         if (clearing || completed) return;
-        clearing = true; retry.setEnabled(false); browser.stopLoading();
+        clearing = true; pageLoaded = false; retry.setEnabled(false); browser.stopLoading();
         browser.loadUrl("about:blank"); browser.clearHistory(); browser.clearCache(true); browser.clearFormData();
         status.setText("正在清理登录窗口的旧会话；已保存的预约账号不会被删除。");
         // This only clears the app WebView cookie jar. Account credentials live
@@ -131,6 +126,7 @@ public class SchoolLoginActivity extends AppCompatActivity {
     }
     private void capture(boolean manual) {
         if (completed || clearing || !resumed || browser == null) return;
+        if (!pageLoaded) { if (manual) status.setText("学校页面尚未加载完成，请等待后再点击“完成登录”。"); return; }
         String current = browser.getUrl();
         Uri uri = Uri.parse(current == null ? "" : current);
         if (!trusted(uri) || !"ehall.szu.edu.cn".equals(uri.getHost()) || uri.getPath() == null
@@ -152,15 +148,14 @@ public class SchoolLoginActivity extends AppCompatActivity {
         }
         if (cookie.length() > 64000) { status.setText("登录信息异常过长，请换号重试。"); return; }
         CookieManager.getInstance().flush();
-        completed = true; handler.removeCallbacks(poll);
+        completed = true;
         Intent data = new Intent(); data.putExtra("cookie", cookie);
         data.putExtra("userAgent", browser.getSettings().getUserAgentString());
         setResult(Activity.RESULT_OK, data); finish();
     }
-    @Override protected void onResume() { super.onResume(); resumed = true; handler.post(poll); }
-    @Override protected void onPause() { resumed = false; handler.removeCallbacks(poll); super.onPause(); }
+    @Override protected void onResume() { super.onResume(); resumed = true; }
+    @Override protected void onPause() { resumed = false; super.onPause(); }
     @Override protected void onDestroy() {
-        handler.removeCallbacksAndMessages(null);
         if (browser != null) { browser.stopLoading(); ((ViewGroup) browser.getParent()).removeView(browser); browser.destroy(); browser = null; }
         super.onDestroy();
     }

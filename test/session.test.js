@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { importSessionFromCurl, loadSession, saveSession } from '../desktop/src/session.js';
+import { HttpClient } from '../desktop/src/http-client.js';
 
 async function withSessionPath(run) {
   const directory = await mkdtemp(join(tmpdir(), 'court-booker-session-'));
@@ -46,3 +47,45 @@ test('并发刷新登录态时仍原子写入有效文件', async () => {
     assert.equal((await stat(path)).mode & 0o777, 0o600);
   });
 });
+
+test('关键预约抢先于排队后台读取，并取消已在途的只读后台查询', async () => withSessionPath(async (path) => {
+  await saveSession({ userAgent: 'test', cookies: [] }, path);
+  let backgroundEntered, criticalEntered;
+  const waiting = new Promise((resolve) => backgroundEntered = resolve), dispatched = new Promise((resolve) => criticalEntered = resolve);
+  const calls = [];
+  const transport = async (url, options) => {
+    const name = url.pathname.split('/').at(-1); calls.push(name);
+    if (name === 'slow.do') {
+      backgroundEntered(); await new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
+    }
+    if (name === 'book.do') criticalEntered();
+    return new Response(JSON.stringify({ code: '0' }), { headers: { 'content-type': 'application/json' } });
+  };
+  const background = await HttpClient.create({ sessionPath: path, priority: 'background', transport });
+  const critical = await HttpClient.create({ sessionPath: path, priority: 'critical', transport });
+  const slow = background.post('slow.do', {}, { abortInFlight: true }).catch((error) => error);
+  await waiting;
+  const queued = background.post('later.do', {}, { abortInFlight: true });
+  const booking = critical.post('book.do', {});
+  await dispatched; await Promise.all([slow, queued, booking]);
+  assert.deepEqual(calls, ['slow.do', 'book.do', 'later.do']);
+}));
+
+test('关键请求不得中断已发出的后台标记预约，排队取消不会发送', async () => withSessionPath(async (path) => {
+  await saveSession({ userAgent: 'test', cookies: [] }, path);
+  let release, entered;
+  const response = new Promise((resolve) => release = resolve), waiting = new Promise((resolve) => entered = resolve), calls = [];
+  const transport = async (url, options) => {
+    calls.push(url.pathname.split('/').at(-1));
+    if (calls.length === 1) { entered(); await response; assert.equal(options.signal.aborted, false); }
+    return new Response(JSON.stringify({ code: '0' }), { headers: { 'content-type': 'application/json' } });
+  };
+  const first = await HttpClient.create({ sessionPath: path, priority: 'background', transport });
+  const next = await HttpClient.create({ sessionPath: path, priority: 'critical', transport });
+  const booked = first.post('first-book.do', {}); await waiting;
+  const controller = new AbortController();
+  const canceled = next.post('cancel.do', {}, { signal: controller.signal });
+  const rejected = assert.rejects(canceled, { code: 'REQUEST_NOT_SENT' });
+  controller.abort(); release();
+  await Promise.all([booked, rejected]); assert.deepEqual(calls, ['first-book.do']);
+}));

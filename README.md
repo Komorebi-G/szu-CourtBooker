@@ -96,6 +96,7 @@ npm run web -- --no-open
 
 ```sh
 # 不访问学校的自动化测试
+npm ci --prefix mobile
 npm run check
 
 # Android 界面构建

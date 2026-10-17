@@ -17,6 +17,6 @@ jobs:
             package-lock.json
             mobile/package-lock.json
       - run: npm ci
-      - run: npm run check
       - run: npm ci --prefix mobile
+      - run: npm run check
       - run: npm run build --prefix mobile

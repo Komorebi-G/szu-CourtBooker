@@ -4,6 +4,7 @@
 
 ```sh
 npm ci
+npm ci --prefix mobile
 npm run check
 npm run web -- --no-open
 ```

@@ -59,6 +59,20 @@ public class CourtHttpTest {
         assertEquals("identity", http.execute(request("index.do", false), () -> {}).body);
         assertEquals(2, server.getRequestCount());
     }
+    @Test public void bookingTimingSeparatesDispatchPreparationAndNetworkBody() throws Exception {
+        server.enqueue(new MockResponse().setBody("complete").setBodyDelay(50, TimeUnit.MILLISECONDS));
+        long before = System.currentTimeMillis();
+        CourtHttp.Result result = http.execute(request("sportVenue/insertVenueBookingInfo.do", true), () -> {},
+            1000L, null, null, () -> {
+                try { Thread.sleep(50); } catch (InterruptedException error) { throw new AssertionError(error); }
+            });
+        assertEquals("complete", result.body);
+        assertTrue(result.dispatchPreparationMs >= 40);
+        assertTrue(result.networkStartedAt >= before + 40);
+        assertTrue(result.networkDurationMs >= 40);
+        assertTrue(result.networkEndedAt >= result.networkStartedAt);
+        assertEquals(1, server.getRequestCount());
+    }
     @Test public void brokenReusedConnectionRecovers() throws Exception {
         server.enqueue(new MockResponse().setBody("warm"));
         server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST));
@@ -155,6 +169,13 @@ public class CourtHttpTest {
         CourtExecutionGate gate = new CourtExecutionGate(); gate.enable("run");
         assertThrows(CourtExecutionGate.NotSent.class, () -> http.execute(request("sportVenue/insertVenueBookingInfo.do", true),
             () -> gate.check("run", null, 0), 1000L, null, null, () -> gate.disable("run")));
+        assertEquals(0, server.getRequestCount());
+    }
+    @Test public void dispatchDeadlineDuringDurableMarkerPreventsNetworkRequest() {
+        CourtExecutionGate gate = new CourtExecutionGate(); gate.enable("run");
+        AtomicInteger clock = new AtomicInteger(1);
+        assertThrows(CourtExecutionGate.NotSent.class, () -> http.execute(request("sportVenue/insertVenueBookingInfo.do", true),
+            () -> gate.check("run", 2000L, clock.get()), 1000L, 2000L, null, () -> clock.set(2000)));
         assertEquals(0, server.getRequestCount());
     }
 }

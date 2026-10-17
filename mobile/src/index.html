@@ -1,67 +1,68 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="light"><title>场馆预约助手 · 手机</title>
+<meta name="color-scheme" content="light"><meta name="theme-color" content="#f6f6f2"><title>深大场馆预约</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
 <link rel="stylesheet" href="base.css"><link rel="stylesheet" href="styles.css"></head>
 <body>
-<header class="mobile-head"><span class="brand-mark">场</span><b>场馆预约助手</b><span id="runtime" class="project-tag">加载中</span></header>
+<header class="mobile-head"><img class="brand-mark" src="icon.svg" alt="" width="34" height="34"><b>深大场馆预约</b><span class="brand-context">粤海校区</span><span id="runtime" class="runtime-tag" hidden></span></header>
 <main>
 <div id="fatal" class="notice error" role="alert" hidden></div>
 <section id="plansPage">
-  <div class="section-head"><div><p class="eyebrow">SZU · 粤海校区</p><h1>预约方案</h1></div><button id="newPlan" class="primary">＋ 新建</button></div>
+  <div class="section-head"><h1>预约</h1><button id="newPlan" class="primary">＋ 新建预约</button></div>
   <section class="mobile-overview" aria-label="下一步">
-    <ol id="setupSteps" class="setup-steps" aria-label="首次预约步骤"><li data-setup-step="0"><span>1</span>学校登录</li><li data-setup-step="1"><span>2</span>创建方案</li><li data-setup-step="2"><span>3</span>手动执行</li></ol>
     <h2 id="overviewTitle">正在读取方案</h2><p id="overviewHint"></p><button id="overviewAction" class="primary" hidden></button>
   </section>
+  <details id="planTools" class="booking-tools"><summary>查找与批量预约</summary>
   <label class="search-box"><span class="sr-only">搜索方案、日期或场地</span><input id="planSearch" type="search" placeholder="搜索方案" autocomplete="off"></label>
-  <div class="list-tools"><div class="filter-tabs" role="group" aria-label="方案状态筛选"><button data-filter="recent" aria-pressed="true">近期</button><button data-filter="active" aria-pressed="false">进行中</button><button data-filter="attention" aria-pressed="false">需处理</button><button data-filter="all" aria-pressed="false">全部</button></div><span id="planListCount" class="list-count"></span></div>
+  <div class="list-tools"><div class="filter-tabs" role="group" aria-label="方案状态筛选"><button data-filter="recent" aria-pressed="true">近期</button><button data-filter="active" aria-pressed="false">进行中</button><button data-filter="attention" aria-pressed="false">需处理</button><button data-filter="all" aria-pressed="false">全部</button></div></div>
+    <button id="batchSelect" class="secondary">批量预约</button><button id="endBatch" class="text-button" hidden>退出批量选择</button>
+  </details>
   <div id="plans" class="task-list"></div>
-  <div id="batchBar" class="batch-bar"><span id="selectedCount">未选择方案</span><button id="begin" class="primary">执行所选</button></div>
+  <div id="batchBar" class="batch-bar" hidden><span id="selectedCount">未选择预约</span><button id="begin" class="primary">开始所选预约</button></div>
 </section>
 <section id="resultsPage" hidden>
-  <div class="section-head"><h1>执行结果</h1><button id="stop" class="danger" hidden>停止执行</button></div>
+  <div class="section-head"><h1>预约记录</h1><button id="stop" class="danger" hidden>停止预约</button></div>
   <div id="liveStatus" class="schedule-note" hidden></div><div id="runs" class="task-list"></div>
   <button id="loadHistory" class="secondary" hidden>读取更早的执行记录</button>
 </section>
 <section id="accountsPage" hidden>
-  <div class="section-head"><h1>账号</h1><button id="schoolLogin" class="primary">＋ 学校登录</button></div>
-  <p class="explain">登录后自动验证身份；失效时重新登录。</p>
-  <div class="field-actions"><button id="newAccount" class="secondary">导入 JSON / Cookie</button></div>
+  <div class="section-head"><h1>账号</h1><button id="schoolLogin" class="primary">登录学校账号</button></div>
+  <details class="account-transfer"><summary>导入已有登录</summary><button id="newAccount" class="secondary">导入登录文件</button></details>
   <div id="accounts" class="task-list"></div>
   <p class="open-source-note"><a href="https://github.com/Komorebi-G/szu-CourtBooker">项目源码</a></p>
 </section>
 </main>
-<nav class="bottom-tabs" aria-label="主导航"><button data-tab="plans" aria-current="page"><span aria-hidden="true">▦</span>方案</button><button data-tab="results"><span aria-hidden="true">◷</span>结果 <i id="resultsBadge" hidden></i></button><button data-tab="accounts"><span aria-hidden="true">◎</span>账号</button></nav>
+<nav class="bottom-tabs" aria-label="主导航"><button data-tab="plans" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h14v18H5zM8 8h8M8 12h8M8 16h5"/></svg>预约</button><button data-tab="results"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h14v18H5zM8 12l3 3 5-6"/></svg>记录 <i id="resultsBadge" hidden></i></button><button data-tab="accounts"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg>账号</button></nav>
 
 <dialog id="planDialog" aria-labelledby="planTitle"><form id="planForm">
-  <div class="dialog-head"><h2 id="planTitle" tabindex="-1" autofocus>新建方案</h2><button type="button" class="icon-button" data-close="plan" aria-label="关闭方案">×</button></div>
+  <div class="dialog-head"><h2 id="planTitle" tabindex="-1" autofocus>新建预约</h2><button type="button" class="icon-button" data-close="plan" aria-label="关闭预约编辑">×</button></div>
   <div class="dialog-body">
-    <p class="form-section-title">基本信息</p><div class="form-grid">
-      <label>名称 <span class="optional">可不填</span><input id="planName" maxlength="60" placeholder="例如：明天下午羽毛球"></label>
-      <label>执行账号<select id="planAccount" required></select></label>
-      <label>项目<select id="planProject"></select></label><label>预约日期<select id="planDate"></select></label>
+    <div class="form-grid">
+      <label id="planAccountField" class="wide">预约账号<select id="planAccount" required></select></label>
+      <label class="wide">运动<select id="planProject"></select></label>
+      <label class="wide">日期<select id="planDate"></select></label>
     </div>
     <div id="planSchedule" class="schedule-preview"></div>
-    <div class="field-actions"><button id="loadCatalog" type="button" class="secondary">读取学校时段与场地</button></div>
-    <p id="catalogNote" class="field-help">读取目录后，按喜好顺序点击场地。</p>
-    <label>预约目标<select id="bookingGoal"><option value="one">任选一段</option><option value="consecutive">连续两段</option><option value="two" selected>任意两段</option></select></label><p id="bookingGoalHint" class="field-help" hidden>可能只约到一段，已约场地保留。</p><fieldset><legend>预约时段</legend><div id="times" class="time-options"></div>
+    <fieldset><legend>时段</legend><p class="field-help">最多预约两个时段</p><div id="times" class="time-options"></div></fieldset>
+    <div class="catalog-status"><p id="catalogNote" class="field-help" role="status"></p><button id="loadCatalog" type="button" class="secondary" hidden>重新加载</button></div>
+    <fieldset><legend>场地</legend><button id="allCourts" type="button" class="time-option">不限场地</button><div id="courts" class="court-list"></div></fieldset>
+    <details id="planOptions" class="advanced"><summary>更多设置（可跳过）</summary>
+      <label>预约备注 <span class="optional">选填</span><input id="planName" maxlength="60" placeholder="留空自动命名"></label>
+      <label>预约目标<select id="bookingGoal"><option value="one">任选一段</option><option value="consecutive">连续两段</option><option value="two">任意两段</option></select></label><p id="bookingGoalHint" class="field-help" hidden>可能只约到一段，已约场地保留。</p>
+      <label class="check-label"><input id="includeOtherCourts" type="checkbox"><span>已选场地不可用时，尝试其他场地</span></label>
+      <label class="check-label"><input id="sameCourt" type="checkbox"><span>连续时段优先同一场地</span></label>
+      <div class="form-grid"><label>重试间隔（秒）<input id="interval" type="number" min="0.1" max="3600" step="0.1" value="0.1" required></label><label>最长尝试（分钟）<input id="duration" type="number" min="1" max="1440" step="1" value="2" required></label></div>
+      <details id="orderSettings"><summary>调整场地优先顺序</summary><div id="sequence" class="court-sequence"></div></details>
       <details><summary>手动添加时段</summary><div class="manual-time"><input id="timeStart" type="time" aria-label="时段开始"><span>至</span><input id="timeEnd" type="time" aria-label="时段结束"><button id="addTime" type="button" class="secondary">添加</button></div></details>
-    </fieldset>
-    <fieldset><legend>场地顺序</legend><p class="field-help">数字就是尝试顺序。再次点击取消。</p><div id="sequence" class="court-sequence"></div>
-      <div class="field-actions"><button id="allCourts" type="button" class="secondary">按学校顺序全部尝试</button><button id="clearCourts" type="button" class="text-button">清空选择</button></div>
-      <div id="courts" class="court-list"></div>
-    </fieldset>
-    <label class="check-label"><input id="includeOtherCourts" type="checkbox"><span>允许尝试其他场地<small>已选场地失败后，再试其余场地。</small></span></label>
-    <label class="check-label"><input id="sameCourt" type="checkbox"><span>优先同一场地<small>相邻时段先试已约场地，失败后按原顺序尝试。</small></span></label>
-    <p class="hint">同一账号、项目和日期最多成功两段。</p>
-    <details class="advanced"><summary>重试设置</summary><div class="field-actions"><button type="button" class="secondary" data-preset="release">放号抢场设置</button><button type="button" class="secondary" data-preset="salvage">慢速捡漏设置</button></div><div class="form-grid"><label>间隔（秒）<input id="interval" type="number" min="0.1" max="3600" step="0.1" value="0.1" required></label><label>持续（分钟）<input id="duration" type="number" min="1" max="1440" step="1" value="2" required></label></div></details>
-    <div id="selectionSummary" class="selection-summary" role="status"></div><p id="planError" class="form-error" role="alert"></p>
+    </details>
+    <div id="selectionSummary" class="sr-only" role="status"></div><p id="planError" class="form-error" role="alert"></p>
   </div>
-  <div class="dialog-actions"><button type="button" class="secondary" data-close="plan">取消</button><button type="submit" class="primary">保存方案</button></div>
+  <div class="dialog-actions"><button type="button" class="secondary" data-close="plan">取消</button><button id="savePlanButton" type="submit" class="primary">下一步</button></div>
 </form></dialog>
 
 <dialog id="accountDialog"><form id="accountForm">
   <div class="dialog-head"><h2 id="accountTitle">导入账号</h2><button type="button" class="icon-button" data-close="account" aria-label="关闭账号">×</button></div>
-  <div class="dialog-body"><label>账号备注<input id="accountName" maxlength="40" required placeholder="例如：我 / 舍友"></label>
+  <div class="dialog-body"><label>账号备注（选填）<input id="accountName" maxlength="40" placeholder="账号名称"></label>
     <label class="file-label">选择登录 JSON 文件<input id="sessionFile" type="file" accept=".json,.txt,application/json,text/plain"></label>
     <textarea id="sessionText" rows="8" required placeholder="粘贴完整登录 JSON、Cookie 或 cURL"></textarea>
     <p id="accountError" class="form-error" role="alert"></p>
@@ -69,23 +70,21 @@
 </form></dialog>
 
 <dialog id="loginDialog"><div class="dialog-head"><h2 id="loginTitle">学校账号登录</h2><button class="icon-button" data-close="login" aria-label="关闭学校登录">×</button></div>
-  <div class="dialog-body"><label>账号备注（可不填）<input id="loginName" maxlength="40" placeholder="默认使用学校姓名"></label>
-    <p id="loginHint" class="field-help">将打开学校登录页并尝试使用本 App 登录窗口已有的学校会话；如需换号，可在学校窗口点击“换号 / 重试”。完成登录后自动识别并验证，无需手动复制 Cookie。</p>
+  <div class="dialog-body"><details><summary>账号备注（选填）</summary><input id="loginName" maxlength="40" placeholder="默认使用学校姓名"></details>
+    <p id="loginHint" class="field-help">将打开学校登录页，获取登录后自动返回。验证通过后保存账号。</p>
     <p id="loginStatus" class="auth-progress" role="status"></p><p id="loginError" class="form-error" role="alert"></p>
   </div><div class="dialog-actions"><button class="secondary" data-close="login">取消</button><button id="openSchoolLogin" class="primary">打开学校登录</button></div>
 </dialog>
 
-<dialog id="confirmDialog"><div class="dialog-head"><h2>开始本次执行</h2><button class="icon-button" data-close="confirm" aria-label="关闭确认">×</button></div>
+<dialog id="confirmDialog"><div class="dialog-head"><h2>确认预约</h2><button class="icon-button" data-close="confirm" aria-label="关闭确认">×</button></div>
   <div class="dialog-body"><div id="confirmPlans"></div>
-    <label class="run-choice"><input type="radio" name="mode" value="auto" checked><span>按放号时间开始<small>已放号立即尝试，其余方案等待今天 12:30。</small></span></label>
-    <label class="run-choice"><input type="radio" name="mode" value="release"><span>等待放号<small>临近放号核对登录和订单，到 12:30 提交。</small></span></label>
-    <label class="run-choice"><input type="radio" name="mode" value="now"><span>立即尝试<small>现在开始真实预约，按设置间隔继续捡漏。</small></span></label>
-    <p class="muted">确认后提交真实预约。执行期间保持前台与亮屏；切后台会停止。付款在学校系统完成。</p>
+    <p id="confirmTiming" class="confirm-timing"></p>
+    <p class="muted">预约期间保持 App 在前台、屏幕亮着。预约成功后到学校系统付款。</p>
     <p id="confirmError" class="form-error" role="alert"></p>
-  </div><div class="dialog-actions"><button class="secondary" data-close="confirm">返回</button><button id="confirmStart" class="primary">确认并开始</button></div>
+  </div><div class="dialog-actions"><button class="secondary" data-close="confirm">稍后再约</button><button id="confirmStart" class="primary">开始预约</button></div>
 </dialog>
 
-<dialog id="textDialog"><div class="dialog-head"><h2 id="textTitle">登录 JSON</h2><button class="icon-button" data-close="text" aria-label="关闭文本">×</button></div><div class="dialog-body"><textarea id="exportText" rows="14" readonly></textarea></div><div class="dialog-actions"><button id="copyText" class="primary">复制完整内容</button></div></dialog>
+<dialog id="textDialog"><div class="dialog-head"><h2 id="textTitle">登录 JSON</h2><button class="icon-button" data-close="text" aria-label="关闭文本">×</button></div><div class="dialog-body"><textarea id="exportText" rows="14" readonly></textarea><p id="textStatus" class="field-help" role="status" aria-live="polite"></p></div><div class="dialog-actions"><button id="saveText" class="secondary" hidden>保存完整文件</button><button id="copyText" class="primary">复制完整内容</button></div></dialog>
 <div id="toast" class="toast" role="status"></div>
 <script type="module" src="app.js"></script>
 </body></html>

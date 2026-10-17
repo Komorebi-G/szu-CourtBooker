@@ -20,7 +20,8 @@ export function createDiagnostics({ mode, plans, platform, runtime, buildId } = 
     if (!accounts.has(id)) accounts.set(id, `user-${accounts.size + 1}`);
     return { ...plan, accountRef: accounts.get(id) };
   });
-  return { schemaVersion: 1, engineVersion: 'slot-scoped-v2', platform, runtime, buildId, mode,
+  return { schemaVersion: 1, engineVersion: 'slot-scoped-v3', platform, runtime, buildId, mode,
+    startedAtMs: Date.now(),
     plans: diagnosticValue(snapshot), events: 0, uiEventsDropped: 0,
     journalTruncated: false, counts: {}, slotSummaries: {}, summaries: {} };
 }
@@ -31,15 +32,24 @@ export function recordDiagnostic(diagnostics, level, message, details) {
     details: diagnosticValue(details) };
   const event = details?.event;
   if (event) diagnostics.counts[event] = (diagnostics.counts[event] ?? 0) + 1;
+  if (event === 'booking_dispatch' && diagnostics.firstDispatchElapsedMs === undefined
+    && Number.isFinite(details.sentAt) && Number.isFinite(diagnostics.startedAtMs)) {
+    diagnostics.firstDispatchElapsedMs = Math.max(0, details.sentAt - diagnostics.startedAtMs);
+  }
   if (event === 'execution_summary') diagnostics.summaries[details.planId ?? 'current'] = diagnosticValue(details);
-  if (['booking_response', 'booking_error', 'catalog_query'].includes(event)) {
+  if (['booking_response', 'booking_error', 'catalog_query', 'booking_persistence'].includes(event)) {
     const key = JSON.stringify([details.planId ?? details.targetIndex, details.date, details.time]);
     const slot = diagnostics.slotSummaries[key] ??= { planId: details.planId, targetIndex: details.targetIndex,
       date: details.date, time: details.time, queries: 0, attempts: 0 };
+    if (event === 'booking_persistence') { slot.lastPersistenceMs = details.durationMs; return entry; }
     if (event === 'catalog_query') slot.queries++;
     else slot.attempts++;
     Object.assign(slot, { lastOutcome: details.outcome, lastMessage: diagnosticValue(details.message),
       lastCourt: details.court, lastDurationMs: details.durationMs });
+    if (event === 'booking_response') for (const [from, to] of Object.entries({ transportQueueMs: 'lastTransportQueueMs',
+      nativeQueueMs: 'lastNativeQueueMs', dispatchPreparationMs: 'lastDispatchPreparationMs', networkDurationMs: 'lastNetworkDurationMs' })) {
+      if (Number.isFinite(details[from])) slot[to] = details[from];
+    }
   }
   return entry;
 }

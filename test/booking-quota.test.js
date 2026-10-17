@@ -53,3 +53,90 @@ test('同时执行的任务共享上限，新一轮不受已结束历史记录�
   assert.equal(results.reduce((count, r) => count + r.successes.length, 0), 2);
   const fresh = fixture(); await runBooking(fresh.input); assert.equal(fresh.calls.length, 2);
 });
+
+test('停止共享学校核对的发起预约，不连带停止另一个预约', async () => {
+  const first = fixture(), second = fixture(), quota = new BookingQuota(), controller = new AbortController();
+  let started;
+  const querying = new Promise(resolve => { started = resolve; });
+  const stopped = runBooking({ ...first.input, quota, signal: controller.signal,
+    loadSchoolBookings: ({ signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      started();
+    }) });
+  await querying;
+  let freshQueries = 0;
+  const continued = runBooking({ ...second.input, quota, loadSchoolBookings: async () => { freshQueries++; return []; } });
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort(new Error('仅停止第一个预约'));
+  const [a, b] = await Promise.all([stopped, continued]);
+  assert.equal(a.stopped, true);
+  assert.equal(first.calls.length, 0);
+  assert.equal(b.ok, true);
+  assert.equal(second.calls.length, 2);
+  assert.equal(freshQueries, 1);
+});
+
+test('共享订单核对的业务错误仍停止作用域，不被其他预约重试绕过', async () => {
+  const quota = new BookingQuota(); let queries = 0;
+  const load = async () => { queries++; throw new Error('学校订单状态未知'); };
+  const outcomes = await Promise.allSettled([quota.prepare('scope', load), quota.prepare('scope', load)]);
+  assert.ok(outcomes.every(result => result.status === 'rejected'));
+  assert.equal(queries, 1);
+  assert.equal(quota.error('scope'), '学校订单状态未知');
+});
+
+const deferred = () => { let resolve; const promise = new Promise(r => resolve = r); return { promise, resolve }; };
+
+test('旧并发参数不能启用双单：首单完整返回后才发次单，成功两段不发第三单', async () => {
+  const quota = new BookingQuota(), release = deferred(); let sent = 0;
+  const work = ['12:00-13:00', '13:00-14:00', '14:00-15:00'].map(time => quota.attempt('scope', time,
+    async () => { sent++; await release.promise; return { code: '0' }; }, { parallel: true }));
+  assert.equal(sent, 1); release.resolve();
+  assert.deepEqual((await Promise.all(work)).map(r => r.code), ['0', '0', 'LOCAL_DAILY_LIMIT']);
+  assert.equal(sent, 2);
+});
+
+for (const next of ['12:00-13:00', '12:30-13:30']) test(`在途时段 ${next} 重复或重叠，不同时发出`, async () => {
+  const quota = new BookingQuota(), release = deferred(); let sent = 0;
+  const first = quota.attempt('scope', '12:00-13:00', async () => { sent++; await release.promise; return { code: '0' }; }, { parallel: true });
+  const second = quota.attempt('scope', next, async () => { sent++; return { code: '0' }; }, { parallel: true });
+  assert.equal(sent, 1); release.resolve(); await first;
+  assert.match((await second).code, /^LOCAL_SLOT_(BOOKED|CONFLICT)$/); assert.equal(sent, 1);
+});
+
+test('首单失败后按序补候选：第二单在途时第三单仍等待', async () => {
+  const quota = new BookingQuota(), first = deferred(), second = deferred(); let sent = 0;
+  const work = ['12:00-13:00', '13:00-14:00', '14:00-15:00'].map((time, i) => quota.attempt('scope', time,
+    async () => { sent++; if (i === 0) { await first.promise; return { code: '1' }; }
+      if (i === 1) await second.promise; return { code: '0' }; }, { parallel: true }));
+  assert.equal(sent, 1); first.resolve(); await work[0];
+  await new Promise(r => setImmediate(r)); assert.equal(sent, 2);
+  second.resolve(); assert.deepEqual((await Promise.all(work)).map(r => r.code), ['1', '0', '0']);
+  assert.equal(quota.remaining('scope'), 0);
+});
+
+test('同一学校账号跨项目与日期共享串行队列，不同账号可同时发送', async () => {
+  const quota = new BookingQuota(), release = deferred(), sent = [];
+  const keys = [quota.key('A', '001', 'd1'), quota.key('A', '002', 'd1'),
+    quota.key('A', '001', 'd2'), quota.key('B', '001', 'd1')];
+  const work = keys.map((key, i) => quota.attempt(key, '12:00-13:00', async () => {
+    sent.push(i); if (!i) await release.promise; return { code: '0' };
+  }, { parallel: true }));
+  assert.deepEqual(sent, [0, 3]); release.resolve(); await Promise.all(work);
+  assert.deepEqual(sent, [0, 3, 1, 2]);
+});
+
+test('持续频率拒绝耗尽自动恢复次数后，账号跨日期与项目停止；成功查询不代替提交恢复', async () => {
+  const quota = new BookingQuota(), key = quota.key('A', '001', 'd1');
+  for (let i = 1; i <= 3; i++) {
+    quota.observeOutcome('A', { kind: 'retry', scope: 'rate', message: '操作过于频繁，请稍后再试！' });
+    assert.equal(Boolean(quota.error(key)), i === 3);
+  }
+  let sent = 0;
+  for (const other of [key, quota.key('A', '002', 'd2')]) {
+    const response = await quota.attempt(other, '13:00-14:00', async () => { sent++; return { code: '0' }; });
+    assert.equal(response.code, 'LOCAL_ACCOUNT_STOPPED'); assert.match(response.msg, /操作过于频繁/);
+  }
+  assert.equal(sent, 0);
+  assert.equal((await quota.attempt(quota.key('B', '001', 'd1'), '13:00-14:00', async () => ({ code: '0' }))).code, '0');
+});

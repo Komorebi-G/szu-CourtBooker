@@ -270,6 +270,22 @@ test('旧同账号方案尚未读到身份时，也不能越过本轮未知结�
   assert.match((await readJson(join(sibling, 'state.json'))).error, /待确认/);
 });
 
+test('学校明确冻结账号后，仍在核对身份的旧跨项目方案不能绕过停止状态', { timeout: 4000 }, async t => {
+  const entered = deferred(), response = deferred(), identityEntered = deferred(), identityResponse = deferred();
+  t.after(() => { response.resolve(); identityResponse.resolve(); });
+  const f = await laboratory(t, { identity: async (account, path) => {
+    if (path === 'slow-identity') { identityEntered.resolve(); await identityResponse.promise; }
+    return { id: account, name: account };
+  }, book: async () => { entered.resolve(); await response.promise; return { code: '1', msg: '账号冻结' }; } });
+  const first = await f.job('A'), sibling = await f.job('A', { sport: '002', times: [late], alias: 'slow-identity' });
+  const work = f.live.start(first); await entered.promise;
+  const other = f.live.start(sibling); await identityEntered.promise;
+  response.resolve(); await work; identityResponse.resolve(); await other;
+  assert.equal(f.calls.length, 1);
+  assert.match((await readJson(join(sibling, 'state.json'))).error, /账号冻结/);
+  assert.deepEqual((await readJson(join(first, 'state.json'))).pendingRequests, {});
+});
+
 test('发单前意图保存失败，不把确定未发送的预约计为未知结果', { timeout: 4000 }, async (t) => {
   let dir, broken = false;
   const f = await laboratory(t, { rooms: async () => {

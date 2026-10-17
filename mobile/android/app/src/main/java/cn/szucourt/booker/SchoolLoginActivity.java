@@ -7,6 +7,8 @@ import android.graphics.Bitmap;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.SslErrorHandler;
@@ -29,6 +31,7 @@ import androidx.core.view.WindowInsetsCompat;
 public class SchoolLoginActivity extends AppCompatActivity {
     private static final String APP_URL = "https://ehall.szu.edu.cn/qljfwapp/sys/lwSzuCgyy/index.do#/sportVenue";
     private static final String COOKIE_URL = "https://ehall.szu.edu.cn/qljfwapp/sys/lwSzuCgyy/modules/sportVenue/getOpeningRoom.do";
+    private final Handler handler = new Handler(Looper.getMainLooper());
     private WebView browser;
     private TextView status;
     private Button retry;
@@ -36,6 +39,13 @@ public class SchoolLoginActivity extends AppCompatActivity {
     private boolean resumed;
     private boolean clearing;
     private boolean pageLoaded;
+    private final Runnable poll = new Runnable() {
+        @Override public void run() {
+            if (completed || !resumed) return;
+            capture();
+            if (!completed && resumed) handler.postDelayed(this, 500);
+        }
+    };
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -48,11 +58,13 @@ public class SchoolLoginActivity extends AppCompatActivity {
         });
         LinearLayout toolbar = new LinearLayout(this);
         Button close = new Button(this); close.setText("取消"); close.setOnClickListener(v -> finish());
-        retry = new Button(this); retry.setText("换号 / 重试"); retry.setOnClickListener(v -> startFresh());
-        Button capture = new Button(this); capture.setText("完成登录"); capture.setOnClickListener(v -> capture(true));
+        retry = new Button(this); retry.setText("换号"); retry.setOnClickListener(v -> startFresh());
+        Button refresh = new Button(this); refresh.setText("刷新"); refresh.setOnClickListener(v -> {
+            if (!clearing && !completed) { pageLoaded = false; browser.loadUrl(APP_URL); }
+        });
         toolbar.addView(close, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         toolbar.addView(retry, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        toolbar.addView(capture, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        toolbar.addView(refresh, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         root.addView(toolbar);
         status = new TextView(this); status.setTextSize(13); status.setTextColor(Color.rgb(25, 44, 36));
         int padding = (int) (12 * getResources().getDisplayMetrics().density);
@@ -82,22 +94,23 @@ public class SchoolLoginActivity extends AppCompatActivity {
                 if (completed || clearing) return;
                 Uri uri = Uri.parse(url);
                 pageLoaded = trusted(uri);
-                if (trusted(uri)) status.setText("学校页面：" + uri.getHost() + "\n请核对当前登录账号，进入场馆页面后点击“完成登录”；不要提交预约。");
+                if (trusted(uri)) status.setText("学校页面：" + uri.getHost() + "\n获取登录后自动返回。");
+                capture();
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) { pageLoaded = false; status.setText("页面加载失败，请检查网络后点击“换号 / 重试”，或返回使用登录 JSON 导入。"); }
+                if (request.isForMainFrame()) { pageLoaded = false; status.setText("页面加载失败，请检查网络后点击“刷新”，或返回使用登录 JSON 导入。"); }
             }
             @Override public void onReceivedSslError(WebView view, SslErrorHandler sslHandler, SslError error) {
-                sslHandler.cancel(); status.setText("学校页面证书校验失败，已停止加载。请检查手机时间和网络。");
+                pageLoaded = false; sslHandler.cancel(); status.setText("学校页面证书校验失败，已停止加载。请检查手机时间和网络。");
             }
         });
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override public void handleOnBackPressed() {
-                if (browser.canGoBack()) browser.goBack(); else finish();
+                finish();
             }
         });
-        status.setText("正在打开学校页面；如需切换账号，请点击“换号 / 重试”。");
-        browser.loadUrl(APP_URL);
+        status.setText("正在打开学校页面，获取登录后自动返回；如需切换账号，请点击“换号”。");
+        if (getIntent().getBooleanExtra("fresh", false)) startFresh(); else browser.loadUrl(APP_URL);
     }
 
     private static boolean trusted(Uri uri) {
@@ -124,14 +137,13 @@ public class SchoolLoginActivity extends AppCompatActivity {
             browser.loadUrl(APP_URL);
         });
     }
-    private void capture(boolean manual) {
+    private void capture() {
         if (completed || clearing || !resumed || browser == null) return;
-        if (!pageLoaded) { if (manual) status.setText("学校页面尚未加载完成，请等待后再点击“完成登录”。"); return; }
+        if (!pageLoaded) return;
         String current = browser.getUrl();
         Uri uri = Uri.parse(current == null ? "" : current);
         if (!trusted(uri) || !"ehall.szu.edu.cn".equals(uri.getHost()) || uri.getPath() == null
             || !uri.getPath().startsWith("/qljfwapp/sys/lwSzuCgyy/")) {
-            if (manual) status.setText("还没进入场馆预约页面，请先完成统一身份认证。");
             return;
         }
         String cookie = CookieManager.getInstance().getCookie(COOKIE_URL);
@@ -142,20 +154,18 @@ public class SchoolLoginActivity extends AppCompatActivity {
             if (parts[0].equals("MOD_AUTH_CAS")) cas = true;
             if (parts[0].equals("_WEU")) weu = true;
         }
-        if (!cas || !weu) {
-            if (manual) status.setText("预约登录 Cookie 尚不完整，请等待场馆页面加载完成后重试。");
-            return;
-        }
+        if (!cas || !weu) return;
         if (cookie.length() > 64000) { status.setText("登录信息异常过长，请换号重试。"); return; }
         CookieManager.getInstance().flush();
-        completed = true;
+        completed = true; handler.removeCallbacks(poll);
         Intent data = new Intent(); data.putExtra("cookie", cookie);
         data.putExtra("userAgent", browser.getSettings().getUserAgentString());
         setResult(Activity.RESULT_OK, data); finish();
     }
-    @Override protected void onResume() { super.onResume(); resumed = true; }
-    @Override protected void onPause() { resumed = false; super.onPause(); }
+    @Override protected void onResume() { super.onResume(); resumed = true; handler.post(poll); }
+    @Override protected void onPause() { resumed = false; handler.removeCallbacks(poll); super.onPause(); }
     @Override protected void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
         if (browser != null) { browser.stopLoading(); ((ViewGroup) browser.getParent()).removeView(browser); browser.destroy(); browser = null; }
         super.onDestroy();
     }

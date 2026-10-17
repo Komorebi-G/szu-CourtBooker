@@ -4,24 +4,39 @@ import { join } from 'node:path';
 import { readJson, writeJson } from './jobs.js';
 import { readReferenceCatalog, mergeReferenceCatalogs } from '../../shared/catalog.js';
 
-// Only reference structure is cached. The live runner always queries the target
-// date/slot and never uses these rows as evidence of an available court.
+function catalogKey(accountId, target) {
+  const scope = JSON.stringify([accountId, target.campusCode, target.sportCode, target.modeCode,
+    target.venues.map((venue) => venue.CGBM).sort()]);
+  return createHash('sha256').update(scope).digest('hex');
+}
+
+// Only reference structure is cached. It can identify a fixed court at release,
+// but never establishes a vacancy for salvage or subsequent retries.
 export class ReferenceCatalogStore {
   constructor(dataDir) { this.dir = join(dataDir, 'catalogs'); this.pending = new Map(); this.writes = new Map(); }
+  async loadCached(key) {
+    return readJson(join(this.dir, key + '.json')).catch((error) => {
+      if (error.code === 'ENOENT' || error instanceof SyntaxError) return undefined;
+      throw error;
+    });
+  }
+  async cachedRooms({ accountId = 'default', target }) {
+    const cached = await this.loadCached(catalogKey(accountId, target));
+    // Strip legacy availability flags as well: this is court identity, not a
+    // live view. The shared runner validates identity and the release window.
+    return mergeReferenceCatalogs([], { target, cached }).rooms.map((room) => Object.fromEntries(
+      ['WID', 'CDMC', 'CGBM', 'CQBM', 'XMDM', 'XQDM']
+        .filter((field) => room[field] !== undefined).map((field) => [field, room[field]])));
+  }
   async read({ accountId = 'default', ...input }) {
     const target = { ...input.target, courtNames: null };
-    const scope = JSON.stringify([accountId, target.campusCode, target.sportCode, target.modeCode,
-      target.venues.map((venue) => venue.CGBM).sort()]);
-    const key = createHash('sha256').update(scope).digest('hex');
+    const key = catalogKey(accountId, target);
     // A stopped check owns its abort signal; do not let it cancel another check.
     const queryKey = input.signal ? Symbol() : JSON.stringify([key, input.dates, input.times ?? target.times]);
     if (!this.pending.has(queryKey)) {
       const work = (async () => {
         const path = join(this.dir, key + '.json');
-        const cached = await readJson(path).catch((error) => {
-          if (error.code === 'ENOENT' || error instanceof SyntaxError) return undefined;
-          throw error;
-        });
+        const cached = await this.loadCached(key);
         let catalog = await readReferenceCatalog({ ...input, target, cached,
           deadline: input.deadline === Infinity || input.deadline === undefined ? Date.now() + 45_000 : input.deadline });
         if (catalog.times.length || catalog.courts.length) {

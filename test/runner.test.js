@@ -67,7 +67,7 @@ test('dry-run 验证执行计划但绝不调用下单接口', async (t) => {
   assert.deepEqual(catalogDates, ['2026-09-20']);
 });
 
-test('正式运行只读取一次场地信息并按顺序直接预约', async () => {
+test('正式运行按查询中的可用场地顺序预约', async () => {
   let openingCalls = 0;
   let catalogDate;
   const attempts = [];
@@ -76,8 +76,8 @@ test('正式运行只读取一次场地信息并按顺序直接预约', async ()
       openingCalls += 1;
       catalogDate = input.date;
       return [
-        { WID: 'a', CGBM: 'venue-1', CDMC: '1号场', XMDM: '001', XQDM: '1', disabled: true },
-        { WID: 'b', CGBM: 'venue-1', CDMC: '2号场', XMDM: '001', XQDM: '1', disabled: true },
+        { WID: 'a', CGBM: 'venue-1', CDMC: '1号场', XMDM: '001', XQDM: '1', disabled: false },
+        { WID: 'b', CGBM: 'venue-1', CDMC: '2号场', XMDM: '001', XQDM: '1', disabled: false },
       ];
     },
     async book({ room }) {
@@ -104,6 +104,17 @@ test('正式运行只读取一次场地信息并按顺序直接预约', async ()
   assert.equal(openingCalls, 1);
   assert.equal(catalogDate, addDays(shanghaiDate(), 1));
   assert.deepEqual(attempts, ['2号场', '1号场']);
+});
+
+for (const withPreference of [false, true]) test(`不限或其余场地跳过满员场地：指定优先场地=${withPreference}`, async () => {
+  const attempts = [], room = (id, disabled) => ({ WID: id, CGBM: 'v', CDMC: id, XMDM: '001', XQDM: '1', disabled });
+  const result = await runBooking({ api: { async getOpeningRooms() { return [room('A', true), room('B', true), room('C', false)]; },
+    async book({ room }) { attempts.push(room.WID); return { code: room.WID === 'C' ? '0' : '1', msg: '已满' }; } },
+  client: { async flush() {} }, config: { scheduler: { timeoutMs: 1000, queryConcurrency: 1, pollIntervalMs: 100 }, booking: {} },
+  targets: [{ name: '空位优先', targetIndex: 0, campusCode: '1', sportCode: '001', modeCode: '1.0', times: ['19:00-20:00'],
+    venues: [{ CGBM: 'v' }], courtNames: withPreference ? ['A'] : null, includeOtherCourts: true }],
+  date: addDays(shanghaiDate(), 1), immediate: true, live: true, log() {} });
+  assert.equal(result.ok, true); assert.deepEqual(attempts, ['C']);
 });
 
 test('倒计时前今日目录为空时，放号后按目标日期重读场地再预约', async () => {

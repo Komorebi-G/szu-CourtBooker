@@ -49,9 +49,10 @@ export function intersectServerClockSamples(samples, { maxUncertaintyMs = 1000, 
 // Deadline and cancellation also bound adapters that ignore request options.
 export async function estimateServerClock(api, { signal, deadline = Infinity, maxSamples = 5,
   intervalMs = 250, requestTimeoutMs = 1000, maxUncertaintyMs = 1000,
-  priorEstimate, adaptiveBoundary = false, maxPriorAgeMs = 60_000,
+  priorEstimate, adaptiveBoundary = false, maxPriorAgeMs = 60_000, initialSamples = [],
   now = Date.now, pause = sleep } = {}) {
-  const samples = [];
+  const samples = initialSamples.filter((sample) => serverClockInterval(sample).valid
+    && now() >= sample.endedAt && now() - sample.endedAt <= 5000).slice(-2);
   const priorAge = now() - priorEstimate?.calibratedAt;
   const prior = priorEstimate?.reliable === true && priorAge >= 0 && priorAge <= maxPriorAgeMs
     && Number.isFinite(priorEstimate.lowerOffsetMs) && Number.isFinite(priorEstimate.upperOffsetMs)
@@ -61,13 +62,15 @@ export async function estimateServerClock(api, { signal, deadline = Infinity, ma
   let discardedPrior = false;
   const estimateCurrent = () => ({ ...intersectServerClockSamples(samples, estimateOptions),
     ...(discardedPrior ? { discardedPrior: true } : {}) });
+  if (samples.length && estimateCurrent().reliable) return { ...estimateCurrent(), reusedSamples: samples.length };
+  if (estimateCurrent().reason === 'conflicting_samples') samples.length = 0;
   if (typeof api.sampleServerClock !== 'function') {
     return { reliable: false, offsetMs: 0, sampleCount: 0, reason: 'clock_sampling_unavailable' };
   }
   const count = Math.max(2, Math.min(6, Math.floor(Number(maxSamples) || 5)));
   const spacing = Math.max(100, Number(intervalMs) || 250);
   const timeout = Math.max(1, Number(requestTimeoutMs) || 1000);
-  for (let i = 0; i < count; i++) {
+  for (let i = samples.length; i < count; i++) {
     signal?.throwIfAborted();
     if (now() >= deadline) break;
     if (i > 0) {

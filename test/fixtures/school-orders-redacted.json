@@ -1,0 +1,114 @@
+{
+  "source": {
+    "endpoint": "modules/myBooking/myBookingInfo.do",
+    "capturedAt": "2026-10-13T16:22:00.448Z",
+    "origin": "Archived real school HTTP response, extracted from the original troubleshooting session before these fixes.",
+    "redaction": "Removed personal/payment fields; replaced order, venue and court IDs. Kept protocol fields, statuses and date/time values unchanged."
+  },
+  "rows": [
+    {
+      "YYSJD": "2026-10-12 18:00~2026-10-12 19:00",
+      "YYZT": "CG_QX",
+      "YYZT_DISPLAY": "取消预约",
+      "XMDM": "001",
+      "XMDM_DISPLAY": "羽毛球",
+      "CDWID": "cdwid-redacted-2",
+      "CDWID_DISPLAY": "羽毛球场C5",
+      "CGDM": "cgdm-redacted-1",
+      "XQWID": "1",
+      "YYLX": "1.0",
+      "VERIFY_TYPE": "QX_WZF"
+    },
+    {
+      "YYSJD": "2026-10-12 18:00~2026-10-12 19:00",
+      "YYZT": "CG_WC",
+      "YYZT_DISPLAY": "已完成",
+      "XMDM": "001",
+      "XMDM_DISPLAY": "羽毛球",
+      "CDWID": "cdwid-redacted-3",
+      "CDWID_DISPLAY": "羽毛球场D7",
+      "CGDM": "cgdm-redacted-1",
+      "XQWID": "1",
+      "YYLX": "1.0",
+      "VERIFY_TYPE": "WC"
+    },
+    {
+      "YYSJD": "2026-10-12 19:00~2026-10-12 20:00",
+      "YYZT": "CG_WC",
+      "YYZT_DISPLAY": "已完成",
+      "XMDM": "001",
+      "XMDM_DISPLAY": "羽毛球",
+      "CDWID": "cdwid-redacted-4",
+      "CDWID_DISPLAY": "羽毛球场D5",
+      "CGDM": "cgdm-redacted-1",
+      "XQWID": "1",
+      "YYLX": "1.0",
+      "VERIFY_TYPE": "WC"
+    },
+    {
+      "YYSJD": "2026-10-06 20:00~2026-10-06 21:00",
+      "YYZT": "CG_WC",
+      "YYZT_DISPLAY": "已完成",
+      "XMDM": "001",
+      "XMDM_DISPLAY": "羽毛球",
+      "CDWID": "cdwid-redacted-5",
+      "CDWID_DISPLAY": "羽毛球场B7",
+      "CGDM": "cgdm-redacted-1",
+      "XQWID": "1",
+      "YYLX": "1.0",
+      "VERIFY_TYPE": "WC"
+    },
+    {
+      "YYSJD": "2026-10-06 19:00~2026-10-06 20:00",
+      "YYZT": "CG_WC",
+      "YYZT_DISPLAY": "已完成",
+      "XMDM": "001",
+      "XMDM_DISPLAY": "羽毛球",
+      "CDWID": "cdwid-redacted-6",
+      "CDWID_DISPLAY": "羽毛球场A4",
+      "CGDM": "cgdm-redacted-1",
+      "XQWID": "1",
+      "YYLX": "1.0",
+      "VERIFY_TYPE": "WC"
+    },
+    {
+      "YYSJD": "2026-10-06 15:00~2026-10-06 16:00",
+      "YYZT": "CG_WC",
+      "YYZT_DISPLAY": "已完成",
+      "XMDM": "001",
+      "XMDM_DISPLAY": "羽毛球",
+      "CDWID": "cdwid-redacted-7",
+      "CDWID_DISPLAY": "羽毛球场A8",
+      "CGDM": "cgdm-redacted-1",
+      "XQWID": "1",
+      "YYLX": "1.0",
+      "VERIFY_TYPE": "WC"
+    },
+    {
+      "YYSJD": "2026-09-28 20:00~2026-09-28 21:00",
+      "YYZT": "CG_WC",
+      "YYZT_DISPLAY": "已完成",
+      "XMDM": "001",
+      "XMDM_DISPLAY": "羽毛球",
+      "CDWID": "cdwid-redacted-8",
+      "CDWID_DISPLAY": "羽毛球场C1",
+      "CGDM": "cgdm-redacted-1",
+      "XQWID": "1",
+      "YYLX": "1.0",
+      "VERIFY_TYPE": "WC"
+    },
+    {
+      "YYSJD": "2026-09-28 19:00~2026-09-28 20:00",
+      "YYZT": "CG_WC",
+      "YYZT_DISPLAY": "已完成",
+      "XMDM": "001",
+      "XMDM_DISPLAY": "羽毛球",
+      "CDWID": "cdwid-redacted-9",
+      "CDWID_DISPLAY": "羽毛球场D1",
+      "CGDM": "cgdm-redacted-1",
+      "XQWID": "1",
+      "YYLX": "1.0",
+      "VERIFY_TYPE": "WC"
+    }
+  ]
+}

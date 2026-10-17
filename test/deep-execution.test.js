@@ -17,12 +17,21 @@ import { saveSession, loadSession } from '../desktop/src/session.js';
 import { shanghaiDate, addDays } from '../shared/utils.js';
 import { readDiagnosticJournal } from '../desktop/src/diagnostics.js';
 import { exportDiagnostics } from '../shared/diagnostics.js';
+import { ReferenceCatalogStore } from '../desktop/src/catalogs.js';
+
+// Before 12:30 tomorrow is still closed. Use today's future evening slots in
+// that case, so these immediate HTTP tests never wait for the real noon release.
+function bookableDate() {
+  const today = shanghaiDate();
+  return Date.now() < Date.parse(`${today}T12:30:00+08:00`) ? today : addDays(today, 1);
+}
 
 // Real HTTP sockets and real request parsing. Never contacts the school:
 // only the transport destination is replaced, not the API/execution logic.
-async function laboratory(t, { identity = () => 'A', submit, bookings = () => [] } = {}) {
+async function laboratory(t, { identity = () => 'A', submit, bookings = () => [],
+  rooms = () => [{ WID: 'court', CDMC: 'A', CGBM: 'v', XMDM: '001', XQDM: '1' }] } = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'szu-deep-'));
-  const submissions = [], identityReads = [], bookingReads = [];
+  const submissions = [], identityReads = [], bookingReads = [], roomReads = [];
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const form = new URLSearchParams(Buffer.concat(chunks).toString());
@@ -39,9 +48,10 @@ async function laboratory(t, { identity = () => 'A', submit, bookings = () => []
       xmList: [{ XQDM: '1', XMDM: '001', XMMC: '羽毛球', DCFS: '1.0' }],
       packageVenueList: [{ SSXQ: '1', XM: '001', CGBM: 'v', CGMC: '东馆' }],
     };
-    else if (endpoint === 'getOpeningRoom.do') result = { code: '0', datas: { getOpeningRoom: { rows: [
-      { WID: 'court', CDMC: 'A', CGBM: 'v', XMDM: '001', XQDM: '1' },
-    ] } } };
+    else if (endpoint === 'getOpeningRoom.do') {
+      roomReads.push(Object.fromEntries(form));
+      result = { code: '0', datas: { getOpeningRoom: { rows: rooms(roomReads.length) } } };
+    }
     else if (endpoint === 'insertVenueBookingInfo.do') {
       submissions.push(Object.fromEntries(form));
       if (submit) {
@@ -74,17 +84,47 @@ async function laboratory(t, { identity = () => 'A', submit, bookings = () => []
     const id = randomUUID(), dir = store.path(id); await mkdir(dir, { recursive: true });
     await writeJson(join(dir, 'job.json'), { id, mode: 'now', taskId: id,
       sessionPath: 'unused', accountIdentityId: 'A', releaseAt: Date.now(), createdAt: new Date().toISOString(),
-      config: { targets: [{ name: 'Test', date: addDays(shanghaiDate(), 1), campus: '粤海校区', sport: '羽毛球',
+      config: { targets: [{ name: 'Test', date: bookableDate(), campus: '粤海校区', sport: '羽毛球',
         mode: '包场', venues: ['东馆'], courts: ['A'], times: [time] }],
       scheduler: { timeoutMs: 2000, queryConcurrency: 1, pollIntervalMs: 100 }, booking: { taskConcurrency: 1 } } });
     await writeJson(join(dir, 'state.json'), { status: 'queued', logs: [], successes: [] });
     return { id, dir };
   }
-  return { dataDir, live, store, job, submissions, identityReads, bookingReads, origin };
+  return { dataDir, live, store, job, submissions, identityReads, bookingReads, roomReads, origin };
 }
 
+async function saveCourtStructure(f) {
+  await new ReferenceCatalogStore(f.dataDir).read({ accountId: 'default', dates: [shanghaiDate()],
+    target: { campusCode: '1', sportCode: '001', modeCode: '1.0', venues: [{ CGBM: 'v' }], times: ['19:00-20:00'] },
+    api: { async getTimeList() { return [{ CODE: '19:00-20:00' }]; }, async getOpeningRooms() {
+      return [{ WID: 'court', CDMC: 'A', CGBM: 'v', XMDM: '001', XQDM: '1', disabled: true, text: '旧日期已满' }];
+    } } });
+}
+
+test('真实 HTTP：桌面固定场地倒计时使用已保存结构，到点无需等待空位查询', { timeout: 8000 }, async t => {
+  const f = await laboratory(t, { rooms: () => [] });
+  await saveCourtStructure(f);
+  const job = await f.job(), saved = await readJson(join(job.dir, 'job.json'));
+  saved.mode = 'release'; saved.releaseAt = Date.now() + 1800;
+  await writeJson(join(job.dir, 'job.json'), saved);
+  await f.live.start(job.dir);
+  const state = await f.store.get(job.id);
+  assert.equal(state.status, 'success', state.error);
+  assert.equal(f.roomReads.length, 0, '固定场地结构只为倒计时首单省去查询');
+  assert.deepEqual(f.submissions.map(form => [form.CDWID, form.KYYSJD, form.YYRGH]), [['court', '19:00-20:00', 'A']]);
+  assert.equal(f.bookingReads[0].pageSize, '500', '临近放号以已支持的大分页减少准备请求');
+});
+
+test('真实 HTTP：桌面立即捡漏不把保存的场地结构当空位，全满时零提交', async t => {
+  const f = await laboratory(t, { rooms: n => [{ WID: 'court', CDMC: 'A', CGBM: 'v', XMDM: '001', XQDM: '1', disabled: n === 1 }] });
+  await saveCourtStructure(f);
+  const job = await f.job(); await f.live.start(job.dir);
+  assert.equal((await f.store.get(job.id)).status, 'success');
+  assert.equal(f.roomReads.length, 2); assert.equal(f.submissions.length, 1);
+});
+
 test('真实 HTTP：已有一段时，并发桌面任务共享最后一个名额，只查询一次学校记录', async (t) => {
-  const f = await laboratory(t, { bookings: () => [{ YYRQ: addDays(shanghaiDate(), 1), KYYSJD: '18:00-19:00',
+  const f = await laboratory(t, { bookings: () => [{ YYRQ: bookableDate(), KYYSJD: '18:00-19:00',
     XMDM: '001', YYZT_DISPLAY: '已支付', CDWID: 'court', CDMC: 'A' }] });
   const a = await f.job(), b = await f.job('20:00-21:00');
   await Promise.all([f.live.start(a.dir), f.live.start(b.dir)]);
@@ -94,13 +134,13 @@ test('真实 HTTP：已有一段时，并发桌面任务共享最后一个名额
 });
 test('真实 HTTP：学校已有两个未选时段，桌面执行不再提交', async (t) => {
   const f = await laboratory(t, { bookings: () => ['17:00-18:00', '18:00-19:00'].map((time) => ({
-    YYRQ: addDays(shanghaiDate(), 1), KYYSJD: time, XMDM: '001', YYZT_DISPLAY: '已支付', CDWID: 'court', CDMC: 'A',
+    YYRQ: bookableDate(), KYYSJD: time, XMDM: '001', YYZT_DISPLAY: '已支付', CDWID: 'court', CDMC: 'A',
   })) });
   const job = await f.job(); await f.live.start(job.dir);
   assert.equal(f.submissions.length, 0); assert.equal((await f.store.get(job.id)).status, 'limited');
 });
 test('真实 HTTP：学校已有预约与候选部分重叠，不重复提交', async (t) => {
-  const f = await laboratory(t, { bookings: () => [{ YYRQ: addDays(shanghaiDate(), 1), KYYSJD: '19:30-20:30',
+  const f = await laboratory(t, { bookings: () => [{ YYRQ: bookableDate(), KYYSJD: '19:30-20:30',
     XMDM: '001', YYZT_DISPLAY: '已支付', CDWID: 'court', CDMC: 'A' }] });
   const a = await f.job(), b = await f.job('20:00-21:00');
   await Promise.all([f.live.start(a.dir), f.live.start(b.dir)]);
@@ -108,7 +148,7 @@ test('真实 HTTP：学校已有预约与候选部分重叠，不重复提交', 
   for (const job of [a, b]) assert.match((await f.store.get(job.id)).error, /重叠/);
 });
 test('真实 HTTP：学校订单未知时桌面停止预约，保留核对原因', async (t) => {
-  const f = await laboratory(t, { bookings: () => [{ YYRQ: addDays(shanghaiDate(), 1), KYYSJD: '19:30-20:30',
+  const f = await laboratory(t, { bookings: () => [{ YYRQ: bookableDate(), KYYSJD: '19:30-20:30',
     XMDM: '001', YYZT_DISPLAY: '未知状态' }] });
   const job = await f.job(); await f.live.start(job.dir);
   assert.equal(f.submissions.length, 0); assert.match((await f.store.get(job.id)).error, /人工核对/);

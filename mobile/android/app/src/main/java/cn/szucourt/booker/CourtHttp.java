@@ -34,8 +34,11 @@ final class CourtHttp {
         final int status;
         final Headers headers;
         final String body;
-        Result(Response response, String body) {
+        final long networkStartedAt, networkEndedAt, networkDurationMs, dispatchPreparationMs;
+        Result(Response response, String body, long startedAt, long durationMs, long preparationMs) {
             this.status = response.code(); this.headers = response.headers(); this.body = body;
+            this.networkStartedAt = startedAt; this.networkEndedAt = System.currentTimeMillis();
+            this.networkDurationMs = durationMs; this.dispatchPreparationMs = preparationMs;
         }
     }
 
@@ -102,12 +105,17 @@ final class CourtHttp {
             long timeout = http.callTimeoutMillis();
             http = http.newBuilder().callTimeout(timeout > 0 ? Math.min(timeout, remaining) : remaining, TimeUnit.MILLISECONDS).build();
         }
+        long preparationStarted = System.nanoTime();
         if (!isQuery(request)) { beforeMutation.run(); checkExecution.run(); }
+        long preparationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - preparationStarted);
         Call call = http.newCall(request);
         if (cancellation != null) cancellation.attach(call);
+        long networkStartedAt = System.currentTimeMillis(), networkStarted = System.nanoTime();
         try (Response response = call.execute()) {
             // Consume the body inside the retry boundary: execute() alone only reads headers.
-            return new Result(response, response.body() == null ? "" : response.body().string());
+            String body = response.body() == null ? "" : response.body().string();
+            return new Result(response, body, networkStartedAt,
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - networkStarted), preparationMs);
         } finally { if (cancellation != null) cancellation.detach(call); }
     }
 }

@@ -11,7 +11,7 @@ function check(signal, deadline) {
 // Merge all requested slots before applying preference order.
 export async function readCourtCatalog({ api, target, date, times = target.times ?? [],
   discoverTimes = false, signal, deadline = Infinity, tolerateUnavailable = false,
-  partialOnDeadline = false, timeoutMs, onQuery = () => {}, onRooms }) {
+  partialOnDeadline = false, timeoutMs, onQuery = () => {}, onRooms, onWait, onRateLimit = () => {} }) {
   const queries = new Set(times);
   const listedTimes = [];
   const issues = [];
@@ -22,7 +22,7 @@ export async function readCourtCatalog({ api, target, date, times = target.times
     try {
       check(signal, deadline);
       rows = await api.getTimeList({ campusCode: target.campusCode, sportCode: target.sportCode,
-        modeCode: target.modeCode, date, signal, deadline });
+        modeCode: target.modeCode, date, signal, deadline, onWait });
       afterQuery();
       if (!Array.isArray(rows)) throw new Error('时段接口响应格式异常：缺少时段数组');
       if (rows.some((row) => { try { splitTimeSlot(row?.CODE); return false; } catch { return true; } })) {
@@ -58,7 +58,7 @@ export async function readCourtCatalog({ api, target, date, times = target.times
       let rooms;
       try {
         rooms = await api.getOpeningRooms({ campusCode: target.campusCode, sportCode: target.sportCode,
-          modeCode: target.modeCode, venueCode: venue.CGBM, date, time, signal, deadline,
+          modeCode: target.modeCode, venueCode: venue.CGBM, date, time, signal, deadline, onWait,
           timeoutMs: timeoutMs === undefined ? undefined : Math.max(1, Math.min(timeoutMs, deadline - Date.now())) });
       } catch (error) {
         afterQuery();
@@ -71,12 +71,16 @@ export async function readCourtCatalog({ api, target, date, times = target.times
           outcome: canContinue ? 'unavailable' : 'error', message: error.message });
         if (!tolerateUnavailable || !canContinue) throw error;
         issues.push({ date, time, venue: venue.CGBM, message: error.message, transient: isTransientQueryError(error) });
+        if (['rate', 'server'].includes(error.outcome?.scope) || error.status === 429) {
+          onRateLimit(error); break queryLoop;
+        }
         continue;
       }
       afterQuery();
       if (!Array.isArray(rooms)) throw new Error('场地接口响应格式异常：缺少场地数组');
       onQuery({ time, venue: venue.CGBM, durationMs: Date.now() - startedAt,
-        outcome: rooms.length ? 'rooms' : 'empty', count: rooms.length });
+        outcome: rooms.length ? 'rooms' : 'empty', count: rooms.length,
+        available: rooms.filter(room => !room.disabled).length, unavailable: rooms.filter(room => room.disabled).length });
       const group = { target, date, time, timeIndex: 0, venue, venueIndex };
       for (const task of roomsToTasks(group, rooms).sort(compareTasks)) {
         if (!found.has(task.room.WID)) found.set(task.room.WID, task);

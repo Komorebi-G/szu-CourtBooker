@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Keep the Windows GUI executable reachable after its browser tab is closed.
 // The tray process only asks the manager to shut down; it never kills a live booking request.
@@ -11,22 +12,23 @@ $script:baseUrl = '${url.replaceAll("'", "''")}'
 $script:ownerPid = ${ownerPid}
 $script:context = New-Object System.Windows.Forms.ApplicationContext
 $script:icon = New-Object System.Windows.Forms.NotifyIcon
-$script:icon.Icon = [System.Drawing.SystemIcons]::Application
-$script:icon.Text = '场馆预约助手（右键退出）'
+$script:brandIcon = [System.Drawing.Icon]::new('${fileURLToPath(new URL('../web/icon.ico', import.meta.url)).replaceAll("'", "''")}')
+$script:icon.Icon = $script:brandIcon
+$script:icon.Text = '深大场馆预约（右键退出）'
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $open = $menu.Items.Add('打开管理页面')
 $quit = $menu.Items.Add('退出并停止执行')
 $open.Add_Click({ Start-Process $script:baseUrl })
 $script:icon.Add_DoubleClick({ Start-Process $script:baseUrl })
 $quit.Add_Click({
-  $answer = [System.Windows.Forms.MessageBox]::Show('停止全部执行并退出助手？会等待已发出的请求返回。', '场馆预约助手', 'YesNo', 'Question')
+  $answer = [System.Windows.Forms.MessageBox]::Show('停止全部执行并退出应用？会等待已发出的请求返回。', '深大场馆预约', 'YesNo', 'Question')
   if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
   try {
     Invoke-WebRequest -Uri ($script:baseUrl + '/api/app/quit') -Method Post -UseBasicParsing -TimeoutSec 120 | Out-Null
     $script:icon.Visible = $false
     $script:context.ExitThread()
   } catch {
-    [System.Windows.Forms.MessageBox]::Show('退出失败：' + $_.Exception.Message, '场馆预约助手') | Out-Null
+    [System.Windows.Forms.MessageBox]::Show('退出失败：' + $_.Exception.Message, '深大场馆预约') | Out-Null
   }
 })
 $script:icon.ContextMenuStrip = $menu
@@ -41,7 +43,7 @@ $timer.Add_Tick({
 })
 $timer.Start()
 try { [System.Windows.Forms.Application]::Run($script:context) }
-finally { $timer.Stop(); $timer.Dispose(); $script:icon.Dispose(); $menu.Dispose() }
+finally { $timer.Stop(); $timer.Dispose(); $script:icon.Dispose(); $script:brandIcon.Dispose(); $menu.Dispose() }
 `;
 }
 

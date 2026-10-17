@@ -1,4 +1,4 @@
-import { executionStatus } from '../../shared/booking-outcome.js';
+import { executionStatus, classifyBookingResponse } from '../../shared/booking-outcome.js';
 import { runBooking, executionIntent } from '../../shared/runner.js';
 import { resolveTargets } from '../../shared/planner.js';
 import { PROJECTS } from '../../shared/projects.js';
@@ -8,6 +8,7 @@ import { withBooking } from '../../shared/api.js';
 import { createDiagnostics, recordDiagnostic } from '../../shared/diagnostics.js';
 import { shanghaiDate, addDays, splitTimeSlot, resolveDate } from '../../shared/utils.js';
 import { validateBookingGoal } from '../../shared/booking-goal.js';
+import { RequestQueue } from '../../shared/request-queue.js';
 import { combineAbortSignals } from '../../shared/abort-signal.js';
 import { pendingMobileRequests } from './store.js';
 
@@ -111,10 +112,13 @@ export class ForegroundExecution {
       if (first) run.inFlight = first; else delete run.inFlight;
     };
     const forgetIntent = (id) => { delete run.pendingRequests[id]; syncInFlight(); };
-    const clearPrepared = (planId) => {
-      const prepared = preparedIntents.get(planId);
+    const clearPreparedSlot = (key) => {
+      const prepared = preparedIntents.get(key);
       if (!prepared) return;
-      forgetIntent(prepared.id); preparedIntents.delete(planId);
+      forgetIntent(prepared.id); preparedIntents.delete(key);
+    };
+    const clearPrepared = (planId) => {
+      for (const [key, prepared] of preparedIntents) if (prepared.planId === planId) clearPreparedSlot(key);
     };
     const fingerprint = (input) => JSON.stringify([input.date, input.time, input.modeCode,
       input.room.WID, input.room.CGBM, input.room.CQBM ?? '', input.room.XMDM, input.room.XQDM]);
@@ -122,18 +126,16 @@ export class ForegroundExecution {
       const id = crypto.randomUUID();
       run.pendingRequests[id] = { requestId: id, planId: plan.id, plan: plan.name, project: plan.project, accountId: plan.accountId,
         accountIdentityId: this.store.state.accounts.find((account) => account.id === plan.accountId)?.userId,
-        date: input.date, time: input.time, court: input.room.CDMC, state, preparedAt: new Date().toISOString() };
+        date: input.date, time: input.time, court: input.room.CDMC, courtId: input.room.WID,
+        venueCode: input.room.CGBM, sportCode: input.room.XMDM, campusCode: input.room.XQDM, modeCode: input.modeCode, state, preparedAt: new Date().toISOString() };
       syncInFlight(); return id;
     };
     const enqueue = (userId, scope, operation) => {
-      const work = (queues.get(userId) ?? Promise.resolve()).then(() => {
+      if (!queues.has(userId)) queues.set(userId, new RequestQueue());
+      return queues.get(userId).run(() => {
         if (scope.signal.aborted || !this.isForeground()) throw new RequestNotSentError('执行已停止或 App 已离开前台，未发送请求');
         return operation();
       });
-      const settled = work.catch(() => {});
-      queues.set(userId, settled);
-      void settled.then(() => { if (queues.get(userId) === settled) queues.delete(userId); });
-      return work;
     };
     try {
       await persist();
@@ -153,7 +155,7 @@ export class ForegroundExecution {
           if (!clients.has(plan.accountId)) clients.set(plan.accountId, (async () => {
             const account = this.store.state.accounts.find((a) => a.id === plan.accountId);
             if (!account) throw new Error('方案账号不存在');
-            const connection = await this.createApi(account, token);
+            const connection = await this.createApi(account, token, { parallelQueries: true });
             signal.throwIfAborted();
             const intent = intents.get(plan.id), remaining = intent.releaseAt - Date.now();
             const deadline = intent.mode === 'release' && remaining > 100
@@ -176,7 +178,7 @@ export class ForegroundExecution {
           scope.signal.throwIfAborted();
           const target = targetFor(plan);
           config = { targets: [target], scheduler: { queryConcurrency: 2, pollIntervalMs: plan.intervalMs,
-            pollJitterMs: 0, timeoutMs: plan.durationMs }, booking: { taskConcurrency: 1 } };
+            pollJitterMs: 0, timeoutMs: plan.durationMs }, booking: { reuseRecentIdentity: true } };
           targets = resolveTargets(config, connection.metadata);
         } catch (error) {
           item.status = signal.aborted ? terminalStatus() : 'error'; item.error = scope?.error?.message ?? error.message;
@@ -188,11 +190,12 @@ export class ForegroundExecution {
           const wrapper = withBooking(api, (input) => enqueue(userId, scope, async () => {
             if (Date.now() > input.deadline) return { code: 'EXPIRED', msg: '执行窗口已结束' };
             // Persist intent before dispatch, but distinguish a cancelled intent from an unknown response.
-            const prepared = preparedIntents.get(plan.id);
+            const preparedKey = `${plan.id}|${input.time}`;
+            const prepared = preparedIntents.get(preparedKey);
             const ready = prepared?.fingerprint === fingerprint(input);
-            if (!ready) clearPrepared(plan.id);
+            if (!ready) clearPreparedSlot(preparedKey);
             const id = ready ? prepared.id : rememberIntent(plan, input, 'prepared');
-            preparedIntents.delete(plan.id);
+            preparedIntents.delete(preparedKey);
             let dispatched = false, response;
             try {
               // A matched first candidate was already durable before release.
@@ -215,6 +218,9 @@ export class ForegroundExecution {
             } catch (error) {
               if (!dispatched || error.code === 'REQUEST_NOT_SENT') {
                 forgetIntent(id);
+                if (error.code === 'REQUEST_NOT_SENT' && Date.now() >= input.deadline) {
+                  error.bookingResponse = { code: 'EXPIRED', msg: '执行窗口已结束' };
+                }
                 if (error.code === 'REQUEST_NOT_SENT' && !error.bookingResponse && !scope.signal.aborted) failAccount(scope, error);
                 if (!dispatched && error.code !== 'REQUEST_NOT_SENT') throw new RequestNotSentError(error.message, { cause: error });
                 throw error;
@@ -224,14 +230,23 @@ export class ForegroundExecution {
               throw error;
             }
             // Keep this account's queue locked until the response is durable.
+            const outcome = classifyBookingResponse(response);
+            if (['account', 'rejected'].includes(outcome.kind)) quota.stop(quota.key(userId, input.room.XMDM, input.date), outcome.message);
             if (response.persistenceError) fail(new Error('本地记录保存失败：' + response.persistenceError));
             run.knownRequests ??= {};
             run.knownRequests[id] = { ...run.pendingRequests[id], code: response.code, message: response.msg,
               orderId: response.data?.DHID, resolvedAt: new Date().toISOString() };
             if (response.code === '0') run.successes.push({ requestId: id, planId: plan.id, name: plan.name,
-              accountId: plan.accountId, date: input.date, time: input.time, court: input.room.CDMC, orderId: response.data?.DHID });
+              accountId: plan.accountId, project: plan.project, date: input.date, time: input.time,
+              court: input.room.CDMC, courtId: input.room.WID, venueCode: input.room.CGBM,
+              sportCode: input.room.XMDM, campusCode: input.room.XQDM, modeCode: input.modeCode, orderId: response.data?.DHID });
             forgetIntent(id);
-            try { await persist(); delete run.knownRequests[id]; }
+            const savingAt = Date.now();
+            try {
+              await persist(); delete run.knownRequests[id];
+              log('INFO', '预约响应已保存', { event: 'booking_persistence', requestId: input.requestId,
+                planId: plan.id, date: input.date, time: input.time, durationMs: Date.now() - savingAt });
+            }
             catch (error) {
               // The school response is known even when saving it fails.
               return { ...response, persistenceError: response.persistenceError ?? error.message };
@@ -240,15 +255,17 @@ export class ForegroundExecution {
           }));
           const result = await runBooking({ api: wrapper, client, config, targets, date: plan.date,
             quota, quotaAccount: userId,
-            loadSchoolBookings: (options) => api.getAllBookings(options),
+            knownRooms: this.store.state.catalogs[`${plan.accountId}:${plan.project}`]?.rooms ?? [],
+            loadSchoolBookings: (options) => api.getAllBookings({ ...options, pageSize: 500 }),
             immediate: intents.get(plan.id).mode === 'now',
             releaseAtServer: intents.get(plan.id).mode === 'release' ? intents.get(plan.id).releaseAt : undefined,
             live: true, signal: scope.signal, log: (level, message, details) => log(level, message, { ...details, planId: plan.id }),
             onPreparedAttempt: async (input) => {
               scope.signal.throwIfAborted();
-              clearPrepared(plan.id);
+              const key = `${plan.id}|${input.time}`;
+              clearPreparedSlot(key);
               const id = rememberIntent(plan, input, 'prepared');
-              preparedIntents.set(plan.id, { id, fingerprint: fingerprint(input) });
+              preparedIntents.set(key, { id, planId: plan.id, fingerprint: fingerprint(input) });
               await persist(); scope.signal.throwIfAborted();
             },
             onState: (status, details) => {
@@ -263,7 +280,9 @@ export class ForegroundExecution {
             onSuccess: async (success) => {
               if (success.reused && !run.successes.some((s) => s.planId === plan.id && s.time === success.task.time)) {
                 run.successes.push({ planId: plan.id, name: plan.name, accountId: plan.accountId, date: plan.date,
-                  time: success.task.time, court: success.task.room.CDMC, orderId: success.response.data?.DHID, reused: true, school: success.school });
+                  time: success.task.time, court: success.task.room.CDMC, courtId: success.task.room.WID,
+                  venueCode: success.task.room.CGBM, sportCode: success.task.room.XMDM, campusCode: success.task.room.XQDM,
+                  modeCode: success.task.target.modeCode, orderId: success.response.data?.DHID, reused: true, school: success.school });
                 await persist();
               }
             } });
@@ -302,7 +321,7 @@ export class ForegroundExecution {
       clearTimeout(logTimer);
       clearTimeout(renderTimer);
       for (const scope of accountScopes.values()) scope.dispose();
-      for (const planId of preparedIntents.keys()) clearPrepared(planId);
+      for (const key of [...preparedIntents.keys()]) clearPreparedSlot(key);
       // A preflight failure/stop must not leave individual plans showing "preparing" forever.
       for (const item of run.items) if (['preparing', 'waiting', 'booking'].includes(item.status)) {
         item.status = signal.aborted && !fatalError ? 'stopped' : 'error';

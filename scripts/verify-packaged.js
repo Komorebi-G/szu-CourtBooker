@@ -6,6 +6,7 @@ import { join, win32 } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
+import { chromium } from 'playwright-core';
 import { windowsArgument } from '../desktop/src/native-scheduler.js';
 import { readJson, writeJson, exists } from '../desktop/src/jobs.js';
 import { sleep, shanghaiDate, addDays } from '../shared/utils.js';
@@ -15,17 +16,23 @@ const ps = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe';
 const literal = (s) => `'${String(s).replaceAll("'", "''")}'`;
 async function powershell(source) {
   return (await exec(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
-    Buffer.from(`$ErrorActionPreference='Stop'; ${source}`, 'utf16le').toString('base64')], { timeout: 30_000 })).stdout.trim();
+    Buffer.from(`$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); ${source}`, 'utf16le').toString('base64')], { timeout: 30_000 })).stdout.trim();
 }
 const windowsTemp = await powershell('[System.IO.Path]::GetTempPath()');
 const tempRoot = (await exec('wslpath', ['-u', windowsTemp])).stdout.trim();
 const dir = await mkdtemp(join(tempRoot, 'szu-exe-probe-'));
 const winDir = (await exec('wslpath', ['-w', dir])).stdout.trim();
 const exe = win32.join(winDir, 'SZU-CourtBooker.exe');
+const build = await readJson('dist/windows-build.json');
 const home = win32.join(winDir, 'isolated data');
 await copyFile('dist/SZU-CourtBooker.exe', join(dir, 'SZU-CourtBooker.exe'));
 const bytes = await readFile(join(dir, 'SZU-CourtBooker.exe'));
 assert.equal(bytes.readUInt16LE(bytes.readUInt32LE(0x3c) + 24 + 68), 2, 'GUI subsystem, no console');
+const brand = JSON.parse(await powershell(`$v=[System.Diagnostics.FileVersionInfo]::GetVersionInfo(${literal(exe)}); @{ProductName=$v.ProductName; FileDescription=$v.FileDescription; OriginalFilename=$v.OriginalFilename; ProductVersion=$v.ProductVersion} | ConvertTo-Json -Compress`));
+assert.equal(brand.ProductName, '深大场馆预约');
+assert.equal(brand.FileDescription, '深大场馆预约');
+assert.equal(brand.OriginalFilename, 'SZU-CourtBooker.exe');
+assert.equal(brand.ProductVersion, [...build.version.split('.'), '0'].slice(0, 4).join('.'));
 const start = async (args, wait = false) => powershell(`$env:PATH="$env:SystemRoot\\System32";
   $p=Start-Process -FilePath ${literal(exe)} -ArgumentList ${literal(['--home', home, ...args].map(windowsArgument).join(' '))} -PassThru ${wait ? '-Wait' : ''};
   ${wait ? 'if ($p.ExitCode -ne 0) { throw "Process failed: $($p.ExitCode)" };' : ''} $p.Id`);
@@ -42,6 +49,14 @@ try {
   await start(['--diagnostics', win32.join(winDir, 'diagnostics.json')], true);
   const diagnostics = await readJson(join(dir, 'diagnostics.json'));
   assert.equal(diagnostics.packaged, true); assert.equal(diagnostics.base, home);
+  assert.equal(win32.basename(diagnostics.appRoot), build.buildId);
+  const appRoot = (await exec('wslpath', ['-u', diagnostics.appRoot])).stdout.trim();
+  for (const file of ['shared/runner.js', 'shared/request-gate.js', 'shared/api.js', 'shared/http-client-core.js',
+    'shared/booking-quota.js', 'shared/booking-goal.js', 'shared/booking-outcome.js', 'shared/booking-review.js',
+    'desktop/src/atomic-file.js', 'desktop/src/job-worker.js', 'desktop/src/execution.js',
+    'desktop/src/http-client.js', 'desktop/src/accounts.js', 'desktop/src/web-server.js', 'desktop/src/catalogs.js']) {
+    assert.ok((await readFile(join(appRoot, file))).equals(await readFile(file)), `实际 EXE 应包含本次修复：${file}`);
+  }
   console.log('通过：独立文件夹、PATH 无 Node/npm、运行时自包含、GUI 子系统。');
   serverPid = Number(await start(['--no-open', '--tray', '--port', '4191']));
   let bootstrap;
@@ -69,6 +84,32 @@ try {
   assert.equal(saved.config.tasks[0].bookingGoal, 'consecutive');
   const changed = await api(`/api/tasks/${saved.taskId}`, 'PUT', { ...plan, bookingGoal: 'one' });
   assert.notEqual(changed.config.tasks[0].revision, saved.config.tasks[0].revision);
+  // View the actual packaged Windows server. Only catalog reads are mocked;
+  // account/task storage and the served HTML/JS/CSS come from the executable.
+  const output = process.env.SZU_UI_ARTIFACTS || '/tmp/courtbooker-packaged-ui';
+  await mkdir(output, { recursive: true });
+  const browser = await chromium.connectOverCDP('http://127.0.0.1:9334');
+  const context = await browser.newContext();
+  try {
+    await context.route('**/*', route => new URL(route.request().url()).origin === base ? route.continue() : route.abort());
+    const page = await context.newPage();
+    await page.route('**/api/projects/*/catalog?*', route => route.fulfill({ json: { ok: true,
+      times: plan.times.map(value => ({ value })), courts: [{ id: 'A', name: '一号场' }] } }));
+    await page.setViewportSize({ width: 1360, height: 950 });
+    await page.goto(base);
+    const row = page.locator(`[data-task="${saved.taskId}"]`);
+    await row.waitFor();
+    assert.equal(await row.locator('h3').innerText(), '羽毛球');
+    await page.screenshot({ path: join(output, 'packaged-desktop.png') });
+    await row.locator('.more-actions summary').click();
+    await row.locator('[data-action=edit]').click();
+    await page.locator('[data-time="19:00-20:00"]').waitFor();
+    assert.equal(await page.locator('#bookingGoal').inputValue(), 'one');
+    assert.equal(await page.locator('#taskOptions').evaluate(element => element.open), false);
+    await page.screenshot({ path: join(output, 'packaged-desktop-editor.png') });
+    await page.locator('[data-close=task]').first().click();
+    assert.equal((await api('/api/bootstrap')).config.tasks[0].revision, changed.config.tasks[0].revision);
+  } finally { await context.close(); await browser.close(); }
   const cancelledStart = randomUUID(); await api('/api/starts/cancel', 'POST', { token: cancelledStart });
   const data = join(dir, 'isolated data', 'data'), jobDir = join(data, 'jobs', id);
   await mkdir(jobDir, { recursive: true });

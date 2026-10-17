@@ -44,6 +44,7 @@ public class CourtDevicePlugin extends Plugin {
         .readTimeout(8, TimeUnit.SECONDS).callTimeout(8, TimeUnit.SECONDS).build());
     private final CourtExecutionGate execution = new CourtExecutionGate();
     private boolean loginPending;
+    private boolean textExportPending;
     private final Map<String, CourtRequestCancellation> readRequests = new ConcurrentHashMap<>();
     private final Map<String, String> readRequestTokens = new ConcurrentHashMap<>();
     private File dispatchDirectory() { return new File(getContext().getFilesDir(), "court-dispatch-v1"); }
@@ -53,7 +54,7 @@ public class CourtDevicePlugin extends Plugin {
         File directory = dispatchDirectory();
         AtomicFile file = new AtomicFile(new File(directory, requestId + ".json")); FileOutputStream out = null;
         try {
-            if (!directory.isDirectory() && !directory.mkdirs()) throw new java.io.IOException("无法创建请求记录目录");
+            if (!directory.isDirectory() && !directory.mkdirs() && !directory.isDirectory()) throw new java.io.IOException("无法创建请求记录目录");
             JSObject marker = new JSObject(); marker.put("requestId", requestId); marker.put("runId", token);
             marker.put("sentAt", System.currentTimeMillis());
             marker.put("accountId", call.getString("accountId"));
@@ -65,7 +66,9 @@ public class CourtDevicePlugin extends Plugin {
                 if (parts.length == 2) form.put(java.net.URLDecoder.decode(parts[0], "UTF-8"), java.net.URLDecoder.decode(parts[1], "UTF-8"));
             }
             marker.put("date", form.get("YYRQ")); marker.put("time", form.get("KYYSJD")); marker.put("courtId", form.get("CDWID"));
-            marker.put("sportCode", form.get("XMDM")); marker.put("accountIdentityId", form.get("YYRGH"));
+            marker.put("venueCode", form.get("CGDM")); marker.put("sportCode", form.get("XMDM"));
+            marker.put("campusCode", form.get("XQWID")); marker.put("modeCode", form.get("YYLX"));
+            marker.put("accountIdentityId", form.get("YYRGH"));
             out = file.startWrite(); out.write(marker.toString().getBytes(StandardCharsets.UTF_8)); file.finishWrite(out);
         } catch (Exception error) {
             if (out != null) file.failWrite(out);
@@ -78,7 +81,11 @@ public class CourtDevicePlugin extends Plugin {
             if (!execution.canLogin()) { call.reject("请先停止预约，再在前台登录"); return; }
             if (loginPending) { call.reject("登录窗口已经打开"); return; }
             loginPending = true;
-            try { startActivityForResult(call, new Intent(getContext(), SchoolLoginActivity.class), "loginResult"); }
+            try {
+                Intent intent = new Intent(getContext(), SchoolLoginActivity.class);
+                intent.putExtra("fresh", call.getBoolean("fresh", false));
+                startActivityForResult(call, intent, "loginResult");
+            }
             catch (Exception error) { loginPending = false; call.reject("无法打开学校登录窗口", error); }
         });
     }
@@ -164,6 +171,9 @@ public class CourtDevicePlugin extends Plugin {
                 JSObject data = new JSObject(value); // Do not overwrite valid storage with malformed JSON.
                 out = file.startWrite(); out.write(value.getBytes(StandardCharsets.UTF_8));
                 file.finishWrite(out);
+                // Cleanup failures occur after commit. Older AtomicFile.failWrite
+                // deletes the committed base when its backup is already gone.
+                out = null;
                 java.util.Set<String> retained = new java.util.HashSet<>();
                 org.json.JSONArray runs = data.optJSONArray("runs");
                 if (runs != null) for (int i = 0; i < runs.length(); i++) {
@@ -185,9 +195,47 @@ public class CourtDevicePlugin extends Plugin {
 
     @PluginMethod public void copy(PluginCall call) {
         getActivity().runOnUiThread(() -> {
-            ClipboardManager manager = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
-            manager.setPrimaryClip(ClipData.newPlainText("场馆预约登录信息", call.getString("text", "")));
-            call.resolve();
+            try {
+                String text = call.getString("text", "");
+                ClipboardManager manager = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                manager.setPrimaryClip(ClipData.newPlainText("深大场馆预约", text));
+                ClipData saved = manager.getPrimaryClip();
+                if (saved == null || saved.getItemCount() == 0 || !text.contentEquals(saved.getItemAt(0).getText())) {
+                    call.reject("剪贴板未保留完整内容，请重试复制"); return;
+                }
+                call.resolve();
+            } catch (Exception error) { call.reject("无法写入剪贴板", error); }
+        });
+    }
+
+    @PluginMethod public void saveText(PluginCall call) {
+        getActivity().runOnUiThread(() -> {
+            if (!execution.canLogin() || loginPending) { call.reject("请等预约和登录结束后再保存文件"); return; }
+            if (textExportPending) { call.reject("保存窗口已经打开"); return; }
+            if (call.getString("text") == null) { call.reject("没有可保存的内容"); return; }
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("application/json").putExtra(Intent.EXTRA_TITLE, call.getString("fileName", "court-diagnostics.json"));
+            textExportPending = true;
+            try { startActivityForResult(call, intent, "textExportResult"); }
+            catch (Exception error) { textExportPending = false; call.reject("无法打开文件保存窗口", error); }
+        });
+    }
+    @ActivityCallback private void textExportResult(PluginCall call, ActivityResult result) {
+        textExportPending = false;
+        if (call == null) return;
+        Intent data = result.getData();
+        if (result.getResultCode() != Activity.RESULT_OK || data == null || data.getData() == null) {
+            JSObject cancelled = new JSObject(); cancelled.put("cancelled", true); call.resolve(cancelled); return;
+        }
+        android.net.Uri destination = data.getData();
+        storage.execute(() -> {
+            try {
+                try (java.io.OutputStream out = getContext().getContentResolver().openOutputStream(destination, "wt")) {
+                    if (out == null) throw new java.io.IOException("文件位置不可写入");
+                    out.write(call.getString("text", "").getBytes(StandardCharsets.UTF_8)); out.flush();
+                }
+                JSObject saved = new JSObject(); saved.put("cancelled", false); call.resolve(saved);
+            } catch (Exception error) { call.reject("保存文件失败，请重新选择位置", error); }
         });
     }
 
@@ -209,6 +257,7 @@ public class CourtDevicePlugin extends Plugin {
     }
 
     @PluginMethod public void request(PluginCall call) {
+        final long queuedAt = System.nanoTime();
         final String token = call.getString("token");
         final String requestId = call.getString("requestId");
         HttpUrl initialUrl = HttpUrl.parse(call.getString("url", ""));
@@ -220,6 +269,7 @@ public class CourtDevicePlugin extends Plugin {
         Object deadlineValue = call.getData().opt("deadlineMs");
         final Long deadlineMs = deadlineValue instanceof Number ? ((Number) deadlineValue).longValue() : null;
         network.execute(() -> {
+            final long nativeQueueMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - queuedAt);
             try {
                 execution.check(token, deadlineMs, System.currentTimeMillis());
                 HttpUrl url = HttpUrl.parse(call.getString("url", ""));
@@ -243,6 +293,10 @@ public class CourtDevicePlugin extends Plugin {
                 JSObject result = new JSObject(); JSObject responseHeaders = new JSObject();
                 for (String key : response.headers.names()) responseHeaders.put(key, new JSArray(response.headers.values(key)));
                 result.put("status", response.status); result.put("headers", responseHeaders);
+                JSObject timing = new JSObject(); timing.put("nativeQueueMs", nativeQueueMs);
+                timing.put("dispatchPreparationMs", response.dispatchPreparationMs);
+                timing.put("networkStartedAt", response.networkStartedAt); timing.put("networkEndedAt", response.networkEndedAt);
+                timing.put("networkDurationMs", response.networkDurationMs); result.put("timing", timing);
                 result.put("body", response.body); call.resolve(result);
             } catch (CourtExecutionGate.NotSent error) {
                 call.reject(error.getMessage(), "REQUEST_NOT_SENT", error);

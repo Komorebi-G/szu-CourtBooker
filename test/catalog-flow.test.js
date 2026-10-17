@@ -40,6 +40,7 @@ test('空目录恢复后才尝试预约', async () => {
   let queries = 0, submitted = 0;
   const args = fixture({ async getOpeningRooms() { return ++queries <= 2 ? [] : [room('A')]; },
     async book() { submitted++; return { code: '0' }; } }, { times: ['19:00-20:00'] });
+  args.config.scheduler.timeoutMs = 5000;
   const result = await runBooking(args);
   assert.equal(result.ok, true); assert.equal(submitted, 1); assert.ok(queries >= 3);
 });

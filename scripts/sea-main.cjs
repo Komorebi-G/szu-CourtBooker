@@ -30,7 +30,7 @@ const splash = showSplash ? powershell([
   'Add-Type -AssemblyName System.Windows.Forms',
   'Add-Type -AssemblyName System.Drawing',
   '$form = New-Object System.Windows.Forms.Form',
-  "$form.Text = '场馆预约助手'",
+  "$form.Text = '深大场馆预约'",
   '$form.Size = [System.Drawing.Size]::new(370, 130)',
   "$form.StartPosition = 'CenterScreen'",
   '$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog',
@@ -118,7 +118,7 @@ main().catch((error) => {
   appendFileSync(join(base, 'startup.log'), `${new Date().toISOString()} ${error.stack}\n`);
   if (showSplash) powershell([
     'Add-Type -AssemblyName System.Windows.Forms',
-    `[void][System.Windows.Forms.MessageBox]::Show('启动失败。请查看 ${join(base, 'startup.log').replaceAll("'", "''")}', '场馆预约助手')`,
+    `[void][System.Windows.Forms.MessageBox]::Show('启动失败。请查看 ${join(base, 'startup.log').replaceAll("'", "''")}', '深大场馆预约')`,
   ].join('\n'));
   process.exitCode = 1;
 });

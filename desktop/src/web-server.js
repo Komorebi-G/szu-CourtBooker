@@ -164,8 +164,9 @@ function publicConfig(config) {
 }
 
 async function createApi(accountId = 'default') {
-  await accounts.metadata(accountId);
-  const client = await HttpClient.create({ sessionPath: accounts.sessionPath(accountId), priority: 'background' });
+  const metadata = await accounts.metadata(accountId);
+  const client = await HttpClient.create({ sessionPath: accounts.sessionPath(accountId), priority: 'background',
+    expectedUserId: metadata.userId });
   return { client, api: new SzuVenueApi(client) };
 }
 
@@ -734,7 +735,7 @@ function openBrowser(url) {
 try {
   const { url, reused } = await startManagerServer(server, { port, host, identity });
   process.env.SZU_SERVER_REUSED = reused ? '1' : '0';
-  console.log(`场馆预约助手${reused ? '已在运行' : '已启动'}：${url}`);
+  console.log(`深大场馆预约${reused ? '已在运行' : '已启动'}：${url}`);
   if (!reused) {
     console.log('Cookie 和配置只保存在本机。按 Ctrl+C 停止。');
     legacyCleanup = jobs.retireSchedules().catch((error) => [`旧定时项清理失败：${error.message}`]);

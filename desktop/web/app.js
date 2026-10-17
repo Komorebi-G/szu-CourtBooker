@@ -1,11 +1,11 @@
-import { installMenus, planExperience, pendingExecutionRequests, visiblePlans, repeatPlan, friendlyDate, selectionSummary } from '/experience.js';
+import { installMenus, planExperience, pendingExecutionRequests, visiblePlans, repeatPlan, friendlyDate, selectionSummary, selectedBookingGoal, bookingTitle } from '/experience.js';
 installMenus();
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const activeStates = ['scheduled', 'queued', 'preparing', 'checking', 'waiting', 'booking', 'stopping'];
 const labels = { scheduled: '旧版定时', queued: '启动中', preparing: '准备中', checking: '检查中', waiting: '等待开始', booking: '预约中',
   stopping: '正在停止', stopped: '已停止', success: '已完成', partial: '部分成功', error: '执行失败',
-  missed: '已错过', limited: '上限已达 · 未预约', expired: '时段已过期', no_result: '未约到', interrupted: '意外中断', corrupt: '记录损坏', draft: '已保存 · 未启动' };
+  missed: '已错过', limited: '上限已达 · 未预约', expired: '时段已过期', no_result: '未约到', interrupted: '意外中断', corrupt: '记录损坏', draft: '未开始' };
 const model = { accounts: [], config: null, jobs: [], session: null, date: '', editing: null, token: 0,
   times: [], options: [], courts: [], order: [], courtLabels: {}, filter: 'recent', query: '', accountFilter: '', pending: null, logTask: null, busy: false };
 const jobDetails = new Map(), logRequests = new Map();
@@ -13,7 +13,6 @@ const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&':
 const format = (epoch) => new Date(epoch).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 const addDays = (date, days) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400_000).toISOString().slice(0, 10);
 const releaseAt = (date) => Date.parse(`${addDays(date, -1)}T12:30:00+08:00`);
-const goalLabels = { one: '任选一段', consecutive: '连续两段', two: '任意两段' };
 const schoolUrl = 'https://ehall.szu.edu.cn/qljfwapp/sys/lwSzuCgyy/index.do#/myBooking';
 const project = (id) => model.config.projects.find((item) => item.id === id);
 const taskJobs = (id) => model.jobs.filter((job) => job.taskId === id).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -47,7 +46,7 @@ function updateCountdowns() {
 async function cancelPendingStart() {
   if (!model.startToken) return;
   const token = model.startToken; model.startToken = null;
-  try { await api('/api/starts/cancel', 'POST', { token }); toast('已取消启动，方案保留'); }
+  try { await api('/api/starts/cancel', 'POST', { token }); toast('已取消启动，预约保留'); }
   catch (error) { toast('取消未得到确认，请重新连接并检查执行状态：' + error.message); }
 }
 
@@ -76,6 +75,7 @@ function renderSession() {
   const selected = $('#authAccount').value || 'default';
   const options = model.accounts.map((account) => '<option value="' + account.id + '">' + escape(accountLabel(account.id)) + '</option>').join('');
   $('#authAccount').innerHTML = options;
+  $('#authAccount').closest('label').hidden = model.accounts.length < 2;
   $('#authAccount').value = model.accounts.some((a) => a.id === selected) ? selected : 'default';
   const taskSelected = $('#taskAccount').value;
   $('#taskAccount').innerHTML = options;
@@ -84,9 +84,8 @@ function renderSession() {
 }
 function renderAccountSummary() {
   const account = model.accounts.find((a) => a.id === $('#authAccount').value);
-  $('#accountSummary').textContent = account?.corrupt ? account.error : !account?.exists ? '尚未导入登录状态'
-    : account.verifiedAt ? '上次验证成功：' + (account.user || account.name) + ' · ' + format(Date.parse(account.verifiedAt)) + '（不代表当前仍有效）'
-    : '登录已保存，等待验证身份';
+  $('#accountSummary').textContent = account?.corrupt ? account.error : !account?.exists ? '尚未登录学校账号'
+    : account.verifiedAt ? '已登录：' + (account.user || account.name) : '登录已保存，预约时会重新验证';
   $('#exportAccountButton').disabled = !account?.exists;
   $('#copyAccountButton').disabled = !account?.exists;
   $('#showAccountButton').disabled = !account?.exists;
@@ -109,7 +108,7 @@ function taskContext(task) {
 function renderTasks() {
   const corrupt = model.jobs.filter((job) => job.status === 'corrupt');
   $('#recordError').hidden = !corrupt.length;
-  $('#recordError').textContent = corrupt.length ? `${corrupt.length} 条本地记录无法读取，原文件已保留。请核对学校预约；其他方案仍可查看。` : '';
+  $('#recordError').textContent = corrupt.length ? `${corrupt.length} 条本地记录无法读取，原文件已保留。请核对学校预约；其他预约仍可查看。` : '';
   model.date = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
   const tasks = model.config.tasks, contexts = tasks.map(taskContext);
   const signature = JSON.stringify([tasks, model.date, model.connected, model.accounts, model.jobs.map(({ id, taskId, status, error, successes, pendingRequests }) => ({ id, taskId, status, error, successes, pendingRequests })), contexts.map((c) => c.experience), model.filter, model.query, model.accountFilter]);
@@ -120,34 +119,22 @@ function renderTasks() {
   const next = visiblePlans(contexts)[0];
   const connected = model.accounts.some((a) => a.exists);
   const setup = !tasks.length && !running.length && !attention.length;
-  const firstStart = connected && contexts.some((context) => !context.experience.expired)
-    && !model.jobs.some((job) => job.mode !== 'check')
-    && !running.length && !attention.length;
-  const ready = contexts.find((context) => context.experience.canStart);
-  $('#workspace').hidden = connected && !setup && !firstStart && !running.length && !attention.length;
-  $('#workspace').classList.toggle('getting-started', setup || firstStart);
-  $('#workspace').classList.toggle('first-start', firstStart);
-  $('#setupSteps').hidden = !setup && !firstStart;
-  $$('[data-setup-step]').forEach((step) => {
-    const current = firstStart ? 3 : connected ? 2 : 1, number = Number(step.dataset.setupStep);
-    step.classList.toggle('current', number === current); step.classList.toggle('complete', number < current);
-    if (number === current) step.setAttribute('aria-current', 'step'); else step.removeAttribute('aria-current');
-  });
+  $('#workspace').hidden = connected && !setup && !running.length && !attention.length;
+  $('#workspace').classList.toggle('getting-started', setup);
   $('#addTaskButton').hidden = setup;
   $('#listTools').hidden = !tasks.length;
+  $('#taskTools').hidden = tasks.length < 2 && !model.query && model.filter === 'recent';
+  $('#accountFilter').closest('label').hidden = model.accounts.length < 2;
   $('#taskList').hidden = setup;
-  $('#nextStepTitle').textContent = running.length ? `${running.length} 个执行正在进行` : !connected ? '先登录你的学校账号' : attention.length ? `${attention.length} 个方案需要处理` : firstStart ? '方案已保存，等你手动开始' : '建好第一个预约方案';
-  $('#nextStepHint').textContent = running.length ? '倒计时和预约进度会在这里更新。保持电脑醒着、联网。' : !connected ? '在学校页面完成登录，再选运动的日期、时段和场地。'
-    : firstStart ? ready ? `点击下方卡片的「${ready.experience.action}」，核对安排后确认开始。`
-      : `方案会保留。${next?.experience.hint ?? '请在放号当天回来'}；到时在下方卡片手动启动。`
-      : next ? next.experience.hint : '选好想运动的时段和场地。保存后，在方案卡片上手动开始。';
-  const nextButton = $('#nextStepButton'); nextButton.hidden = firstStart;
+  $('#nextStepTitle').textContent = running.length ? `${running.length} 个预约进行中` : !connected ? '先登录学校账号' : attention.length ? `${attention.length} 个预约需要核对` : '选择时间和场地';
+  $('#nextStepHint').textContent = running.length ? '保持电脑联网与唤醒。' : !connected ? '使用学校账号登录后，选择运动、日期和时段。' : attention.length ? '请先核对学校订单。' : '确认后开始预约；尚未放号时会等到 12:30。';
+  const nextButton = $('#nextStepButton'); nextButton.hidden = false;
   nextButton.classList.toggle('primary', setup); nextButton.classList.toggle('secondary', !setup);
-  nextButton.textContent = running.length ? '查看进度' : !connected ? '登录学校账号' : attention.length ? '查看需处理方案' : '新建预约方案';
+  nextButton.textContent = running.length ? '查看进度' : !connected ? '登录学校账号' : attention.length ? '查看待核对预约' : '新建预约';
   nextButton.disabled = model.connected === false;
   nextButton.onclick = () => {
     if (running.length) { model.query = ''; model.accountFilter = ''; $('#taskSearch').value = ''; model.filter = 'active'; renderTasks(); $('#taskList').scrollIntoView({ behavior: 'smooth', block: 'start' }); }
-    else if (!connected) $('#authDialog').showModal();
+    else if (!connected) { model.createAfterLogin = !tasks.length; $('#authDialog').showModal(); $('#startAuthButton').click(); }
     else if (attention.length) { model.query = ''; model.accountFilter = ''; $('#taskSearch').value = ''; model.filter = 'attention'; renderTasks(); }
     else if (!next) openTask();
     else taskPrimary(next);
@@ -159,27 +146,24 @@ function renderTasks() {
   const shown = visiblePlans(contexts, { filter: model.filter, query: model.query, accountId: model.accountFilter });
   $('#listCount').textContent = `${shown.length} / ${tasks.length}`;
   if (!shown.length) {
-    $('#taskList').innerHTML = `<div class="empty"><h3>${!tasks.length ? '暂无预约方案' : '没有符合条件的方案'}</h3><p>${!tasks.length ? '选择日期、时段和场地，保存后手动启动。' : '调整搜索或筛选，历史方案在「全部」中查看。'}</p><button class="secondary" data-empty="${!tasks.length ? 'new' : 'all'}">${!tasks.length ? '新建方案' : '查看全部方案'}</button></div>`;
+    $('#taskList').innerHTML = `<div class="empty"><h3>${!tasks.length ? '暂无预约' : '没有匹配的预约'}</h3><button class="secondary" data-empty="${!tasks.length ? 'new' : 'all'}">${!tasks.length ? '新建预约' : '查看全部预约'}</button></div>`;
     return;
   }
-  const expanded = new Set($$('[data-plan-details][open]').map((el) => el.dataset.planDetails));
   $('#taskList').innerHTML = shown.map(({ plan: task, history, check, current, experience: ex }) => {
     const status = current?.status ?? 'draft';
     const stateLabel = current?.mode === 'check' && status === 'success' ? '检查通过 · 未启动' : labels[status] ?? status;
-    const firstCourt = task.courtLabels[task.courts[0]] || (task.courts[0]?.length <= 15 ? task.courts[0] : '已选场地');
-    const courtBrief = task.courts.includes('*') ? '全部场地' : `首选 ${firstCourt}${task.courts.length > 1 ? ` 等 ${task.courts.length} 场` : ''}`;
+    const title = bookingTitle(task, task.projectLabel);
     let action = ex.phase === 'active' ? 'logs' : ex.phase === 'attention' ? 'review' : ex.phase === 'login' ? 'login' : ex.phase === 'done' ? 'logs' : ex.phase === 'expired' ? 'copy' : 'run';
-    return `<article class="task-card phase-${ex.phase}" data-task="${escape(task.id)}"><div class="task-head"><div><div class="task-heading"><span class="project-tag">${escape(task.projectLabel)}</span><h3>${escape(task.name)}</h3></div><p class="task-date">${escape(friendlyDate(task.date))} · ${escape(accountLabel(task.accountId))}</p></div><span class="badge ${escape(status)}">${ex.phase === 'expired' ? '已过期' : escape(stateLabel)}</span></div>
-      <div class="task-content"><div><div class="chips">${task.times.map((time) => `<span class="chip">${escape(time)}</span>`).join('')}</div></div><p class="plan-brief">${escape(goalLabels[task.bookingGoal ?? 'two'])} · ${escape(courtBrief)}${task.preferSameCourt ? ' · 同场优先' : ''}</p></div>
-      <details class="plan-details" data-plan-details="${escape(task.id)}" ${expanded.has(task.id) ? 'open' : ''}><summary>方案详情</summary><div><p class="court-description">${escape(courtText(task))}</p><p class="timing-detail">${escape(format(ex.releaseAt))} 放号 · 每 ${task.intervalMs / 1000} 秒重试 · 最长 ${task.durationMs / 60000} 分钟</p></div></details>
+    const actionLabel = action === 'run' ? ex.phase === 'future' ? '开放当天可开始' : '开始预约' : action === 'copy' ? '换日期再约' : ex.action;
+    return `<article class="task-card phase-${ex.phase}" data-task="${escape(task.id)}"><div class="task-head"><div><div class="task-heading"><h3>${escape(title)}</h3>${title !== task.projectLabel ? `<span class="project-tag">${escape(task.projectLabel)}</span>` : ''}</div><p class="task-date">${escape(friendlyDate(task.date))}${model.accounts.length > 1 ? ' · ' + escape(accountLabel(task.accountId)) : ''}</p></div><span class="badge ${escape(status)}">${ex.phase === 'expired' ? '已过期' : escape(stateLabel)}</span></div>
+      <div class="task-content"><div><div class="chips">${task.times.map((time) => `<span class="chip">${escape(time)}</span>`).join('')}</div></div><p class="plan-brief">${task.courts.includes('*') ? '不限场地' : escape(task.courts.map((court) => task.courtLabels?.[court] ?? court).join(' → '))}</p></div>
       ${check && check !== current ? `<p class="same-court">最近检查：${check.status === 'success' ? '通过（未下单）' : escape(labels[check.status])}</p>` : ''}
       ${current?.error && !current.reviewedOutcome ? `<p class="task-error">${escape(current.error)}</p>` : ''}
       ${ex.pending ? ex.active ? '<p class="same-court">请求已发送，等待学校响应。</p>' : '<p class="task-error">请求结果待确认，请先核对学校“我的预约”。</p>' : ''}
       ${current?.successes?.length ? `<div class="task-results"><strong>已约到 ${current.successes.length} 段</strong>${current.successes.map((s) => `<p>✓ ${escape(s.time)} · ${escape(s.court)}${s.reused ? (s.school ? '（学校已有）' : '（本批次已约）') : ''}</p>`).join('')}<a href="${schoolUrl}" target="_blank" rel="noopener noreferrer">核对预约 / 去付款 ↗</a></div>` : ''}
       <div class="task-footer"><div>${!ex.pending ? `<p class="next-hint">${escape(ex.hint)}</p>` : ''}${ex.active && current.status === 'waiting' ? `<strong class="countdown" data-countdown="${current.releaseAt ?? ex.releaseAt}"></strong>` : ''}</div><div class="task-actions">
-      ${!ex.active ? '<button class="text-button" data-action="edit">编辑</button>' : ''}
-      <details class="more-actions"><summary aria-label="更多方案操作">···</summary><div>${!ex.active && ex.phase !== 'expired' ? '<button class="text-button" data-action="copy">再约一次</button>' : ''}${history.length ? '<button class="text-button" data-action="logs">执行记录</button>' : ''}${!ex.active ? `<button class="text-button" data-action="review">核对并生成剩余方案</button><button class="text-button" data-action="check" ${ex.expired || model.connected === false ? 'disabled' : ''}>检查配置</button><button class="text-button danger-text" data-action="delete">删除方案</button>` : ''}</div></details>
-      ${ex.active ? `<button class="secondary" data-action="logs">查看进度</button><button class="danger" data-action="stop" ${status === 'stopping' ? 'disabled' : ''}>停止本次执行</button>` : `<button class="primary" data-action="${action}" ${ex.phase === 'future' || model.connected === false ? 'disabled' : ''}>${escape(ex.action)}</button>`}</div></div></article>`;
+      ${!ex.active ? `<details class="more-actions"><summary aria-label="修改或删除预约">···</summary><div><button class="text-button" data-action="edit">修改预约</button>${ex.phase !== 'expired' ? '<button class="text-button" data-action="copy">换日期再约</button>' : ''}${history.length && action !== 'logs' ? '<button class="text-button" data-action="logs">预约记录</button>' : ''}<button class="text-button danger-text" data-action="delete">删除预约</button></div></details>` : ''}
+      ${ex.active ? `<button class="secondary" data-action="logs">查看进度</button><button class="danger" data-action="stop" ${status === 'stopping' ? 'disabled' : ''}>停止本次执行</button>` : `<button class="primary" data-action="${action}" ${ex.phase === 'future' || model.connected === false ? 'disabled' : ''}>${escape(actionLabel)}</button>`}</div></div></article>`;
   }).join('');
   updateCountdowns();
 }
@@ -268,17 +252,25 @@ $('#taskDialog').addEventListener('close', () => { model.token++; model.catalogC
 $('#confirmDialog').addEventListener('cancel', () => { void cancelPendingStart(); });
 function schedulePreview() {
   const at = releaseAt($('#taskDate').value);
-  $('#saveTaskButton').hidden = new Date(at + 8 * 3600_000).toISOString().slice(0, 10) > model.date;
-  $('#saveTaskButton').textContent = '保存并启动';
-  $('#schedulePreview').textContent = `学校放号：${format(at)}。${at <= Date.now() ? '已放号，开始本次执行后立即尝试。' : '请在放号当天登录，再开始本次倒计时。'}`;
+  const future = new Date(at + 8 * 3600_000).toISOString().slice(0, 10) > model.date;
+  $('#saveTaskButton').hidden = false;
+  $('#saveTaskButton').value = model.editing !== null || future ? 'draft' : 'start';
+  $('#saveTaskButton').textContent = model.editing !== null ? '保存修改' : future ? '保存预约' : '下一步';
+  $('#schedulePreview').textContent = at <= Date.now() ? '已开放，可以立即预约' : `${friendlyDate(new Date(at + 8 * 3600_000).toISOString().slice(0, 10))} 12:30 开放预约`;
 
 }
 function updateSelectionSummary() {
+  if (!model.customGoal && !model.preserveGoal) $('#bookingGoal').value = selectedBookingGoal(model.times);
   $('#bookingGoalHint').hidden = $('#bookingGoal').value !== 'consecutive';
   const summary = selectionSummary(model.times, model.order, $('#bookingGoal').value);
-  $('#selectionSummary').textContent = summary.text; $('#selectionSummary').classList.toggle('complete', summary.valid);
+  const validationError = !summary.valid && model.times.length ? summary.text : '';
+  if (validationError || $('#taskError').textContent === updateSelectionSummary.validationError) $('#taskError').textContent = validationError;
+  updateSelectionSummary.validationError = validationError;
+  $('#selectionSummary').textContent = summary.valid ? `已选 ${model.times.length} 个时段 · ${model.order.includes('*') ? '不限场地' : model.order.length + ' 个场地'}` : summary.text;
+  $('#selectionSummary').classList.toggle('complete', summary.valid);
+  $('#saveTaskButton').disabled = model.busy || !summary.valid;
 }
-$('#bookingGoal').addEventListener('change', updateSelectionSummary);
+$('#bookingGoal').addEventListener('change', () => { model.customGoal = true; model.preserveGoal = false; updateSelectionSummary(); });
 function renderTimes() {
   updateSelectionSummary();
   $('#timeOptions').innerHTML = model.options.map((time) => `<button type="button" class="time-option ${model.times.includes(time) ? 'selected' : ''}" data-time="${escape(time)}" aria-pressed="${model.times.includes(time)}">${escape(time)}</button>`).join('');
@@ -287,6 +279,7 @@ function renderCourts() {
   updateSelectionSummary();
   const all = model.order.includes('*');
   $('#allCourts').setAttribute('aria-pressed', String(all));
+  $('#orderSettings').hidden = all || model.order.length < 2;
   $('#courtSequence').innerHTML = all ? '全部场地 · 按学校返回的顺序尝试' : model.order.length
     ? model.order.map((id, i) => `<span class="order-chip"><b>${i + 1}</b>${escape(model.courtLabels[id] || id)}<button type="button" data-move="${i}" data-step="-1" aria-label="上移 ${escape(model.courtLabels[id] || id)}" ${i === 0 ? 'disabled' : ''}>↑</button><button type="button" data-move="${i}" data-step="1" aria-label="下移 ${escape(model.courtLabels[id] || id)}" ${i === model.order.length - 1 ? 'disabled' : ''}>↓</button></span>`).join('<span aria-hidden="true">→</span>')
     : '<span class="muted">尚未选择场地</span>';
@@ -305,7 +298,7 @@ async function loadProject(task) {
   $('#preferSameCourt').checked = task?.preferSameCourt ?? id === 'volleyball';
   $('#includeOtherCourts').checked = task?.includeOtherCourts ?? false;
   renderTimes(); renderCourts();
-  $('#timeNote').textContent = '正在读取学校时段目录……';
+  $('#timeNote').textContent = '正在加载可选时段与场地…';
   $('#courtList').innerHTML = '<span class="muted">正在读取场地……</span>';
   $('#courtNote').textContent = '';
   const query = `accountId=${encodeURIComponent($('#taskAccount').value)}&date=${encodeURIComponent($('#taskDate').value)}`;
@@ -313,13 +306,11 @@ async function loadProject(task) {
     .then((value) => ({ value })).catch((error) => ({ error }));
   if (token !== model.token || !$('#taskDialog').open) return;
   const catalog = result.value;
-  const source = catalog ? (catalog.dates?.length ? catalog.dates.join('、') : catalog.date) : '';
-  const note = catalog ? `参考 ${source}${catalog.cached ? '，含此前读到的目录' : ''}；不代表目标日期可订。`
-    + (catalog.partial ? ' 部分目录暂未读到，可重新读取补充。' : '') : '';
   if (catalog) {
     model.options = [...new Set([...catalog.times.map((t) => t.value), ...model.times])].sort();
-    $('#timeNote').textContent = note;
-  } else $('#timeNote').textContent = `时段读取失败：${result.error.message}。可重试或手动填写真实时段。`;
+    $('#timeNote').textContent = catalog.times.length ? '' : '未读到可选时段，请重新加载。';
+  } else $('#timeNote').textContent = `加载失败：${result.error.message}`;
+  $('#refreshCatalog').hidden = Boolean(catalog?.times.length);
   renderTimes();
   if (catalog) {
     model.courts = catalog.courts;
@@ -341,7 +332,7 @@ function openTask(task = null) {
   model.editing = task?.id ?? null;
   $('#taskForm').reset(); $('#taskError').textContent = '';
   $('#taskAccount').value = task?.accountId ?? model.accounts.find((a) => a.exists)?.id ?? model.accounts[0]?.id ?? 'default';
-  $('#taskDialogTitle').textContent = task ? task.id ? '编辑方案' : '再约一次 · 确认新日期' : '新建方案';
+  $('#taskDialogTitle').textContent = task ? task.id ? '编辑预约' : '再约一次 · 确认新日期' : '新建预约';
   $('#taskProject').innerHTML = model.config.projects.map((p) => `<option value="${p.id}">${escape(p.label)}</option>`).join('');
   $('#taskProject').value = task?.projectId || model.config.projects[0].id;
   $('#taskDate').innerHTML = Array.from({ length: 8 }, (_, i) => {
@@ -349,28 +340,33 @@ function openTask(task = null) {
   }).join('');
   if (task && (task.date < model.date || task.date > addDays(model.date, 7))) $('#taskDate').insertAdjacentHTML('afterbegin', `<option value="${escape(task.date)}">${escape(task.date)} · 已过期，请主动选择新日期</option>`);
   $('#taskDate').value = task?.date ?? addDays(model.date, 1);
-  $('#bookingGoal').value = task?.bookingGoal ?? 'two';
+  model.customGoal = false; model.preserveGoal = Boolean(task);
+  $('#taskOptions').open = false; $('#orderSettings').open = false;
+  $('#taskAccountField').hidden = model.accounts.length === 1;
+  $('#bookingGoal').value = task?.bookingGoal ?? selectedBookingGoal(task?.times ?? []);
   $('#taskName').value = task?.name ?? '';
   $('#taskInterval').value = (task?.intervalMs ?? 100) / 1000;
-  $('#taskDuration').value = (task?.durationMs ?? 60_000) / 60_000;
+  $('#taskDuration').value = (task?.durationMs ?? 120_000) / 60_000;
   schedulePreview(); $('#taskDialog').showModal(); $('#taskDialog').scrollTop = 0;
   void loadProject(task);
 }
 $('#addTaskButton').addEventListener('click', () => { if (!model.config) return toast('请先连接管理服务'); openTask(); });
 $('#refreshCatalog').onclick = () => { void loadProject({ times: model.times, courts: model.order, courtLabels: model.courtLabels, preferSameCourt: $('#preferSameCourt').checked, includeOtherCourts: $('#includeOtherCourts').checked }); };
 $('#courtSequence').onclick = (event) => { const button = event.target.closest('[data-move]'); if (!button || button.disabled) return; const i = Number(button.dataset.move), next = i + Number(button.dataset.step); [model.order[i], model.order[next]] = [model.order[next], model.order[i]]; renderCourts(); };
-$$('[data-preset]').forEach((b) => b.onclick = () => { $('#taskInterval').value = b.dataset.preset === 'release' ? '0.1' : '30'; $('#taskDuration').value = b.dataset.preset === 'release' ? '2' : '120'; });
-$('#taskProject').addEventListener('change', () => { $('#taskError').textContent = ''; void loadProject(); });
+$('#taskProject').addEventListener('change', () => { model.customGoal = model.preserveGoal = false; $('#taskError').textContent = ''; void loadProject(); });
 $('#taskDate').addEventListener('change', () => { schedulePreview(); void loadProject({ times: model.times, courts: model.order, courtLabels: model.courtLabels, preferSameCourt: $('#preferSameCourt').checked, includeOtherCourts: $('#includeOtherCourts').checked }); });
 $('#timeOptions').addEventListener('click', (event) => {
   const time = event.target.closest('[data-time]')?.dataset.time;
   if (!time) return;
+  if (!model.customGoal && !model.times.includes(time) && model.times.length >= 2) return toast('最多选择两个时段，再次点击可取消已选时段');
+  model.preserveGoal = false;
   model.times = model.times.includes(time) ? model.times.filter((t) => t !== time) : [...model.times, time].sort(); renderTimes();
 });
 $('#addTimeButton').addEventListener('click', () => {
   const start = $('#manualStart').value, end = $('#manualEnd').value;
   if (!start || !end || start >= end) { $('#taskError').textContent = '请填写有效时段，结束时间须晚于开始时间'; return; }
   const time = `${start}-${end}`; model.options = [...new Set([...model.options, time])].sort();
+  model.preserveGoal = false;
   model.times = [...new Set([...model.times, time])].sort(); renderTimes(); $('#taskError').textContent = '';
 });
 $('#courtList').addEventListener('click', (event) => {
@@ -380,13 +376,12 @@ $('#courtList').addEventListener('click', (event) => {
   model.order = model.order.includes(id) ? model.order.filter((value) => value !== id) : [...model.order, id]; renderCourts();
 });
 $('#allCourts').addEventListener('click', () => { model.order = ['*']; renderCourts(); });
-$('#clearCourts').addEventListener('click', () => { model.order = []; renderCourts(); });
 $('#taskForm').addEventListener('submit', async (event) => {
   event.preventDefault(); if (model.busy) return;
   if (!model.times.length || !model.order.length) { $('#taskError').textContent = '至少选择一个时段和一个场地，或选择尝试全部场地'; return; }
   const summary = selectionSummary(model.times, model.order, $('#bookingGoal').value);
   if (!summary.valid) { $('#taskError').textContent = summary.text; return; }
-  const intent = event.submitter?.value ?? 'draft';
+  const intent = event.submitter?.value ?? $('#saveTaskButton').value;
   const body = { accountId: $('#taskAccount').value, projectId: $('#taskProject').value, name: $('#taskName').value,
     date: $('#taskDate').value, bookingGoal: $('#bookingGoal').value, times: model.times, courts: model.order, courtLabels: model.courtLabels,
     preferSameCourt: $('#preferSameCourt').checked, includeOtherCourts: $('#includeOtherCourts').checked, enabled: true,
@@ -396,7 +391,7 @@ $('#taskForm').addEventListener('submit', async (event) => {
   try {
     const data = await api(model.editing === null ? '/api/tasks' : `/api/tasks/${model.editing}`, model.editing === null ? 'POST' : 'PUT', body);
     model.config = data.config; renderTasks(); closeTask();
-    if (intent === 'start') confirmRun(taskById(data.taskId)); else toast('方案已保存，在卡片上手动开始预约');
+    if (intent === 'start') confirmRun(taskById(data.taskId)); else toast('预约已保存，在卡片上手动开始预约');
   } catch (error) { $('#taskError').textContent = error.message; }
   finally { model.busy = false; $$('#taskForm button[type="submit"]').forEach((b) => { b.disabled = false; }); }
 });
@@ -406,18 +401,18 @@ function confirmRun(task) {
   const at = releaseAt(task.date);
   const mode = at > Date.now() ? 'release' : 'now';
   model.pending = { taskId: task.id, mode };
-  $('#confirmTitle').textContent = mode === 'now' ? '立即尝试预约？' : '开始本次倒计时？';
-  $('#confirmSummary').textContent = `${task.name} · ${task.date}\n用户：${accountLabel(task.accountId)}\n${task.times.join('、')} · ${goalLabels[task.bookingGoal ?? 'two']}\n${mode === 'now' ? '验证登录后立即尝试预约。' : `验证登录后等待 ${format(at)} 放号。请保持助手运行。`}\n每 ${task.intervalMs / 1000} 秒重试，最长 ${task.durationMs / 60_000} 分钟。`;
+  $('#confirmTitle').textContent = '确认预约';
+  $('#confirmSummary').textContent = `${task.projectLabel} · ${friendlyDate(task.date)}\n${task.times.join('、')}\n${task.courts.includes('*') ? '不限场地' : courtText(task)}${model.accounts.length > 1 ? '\n账号：' + accountLabel(task.accountId) : ''}\n\n${mode === 'now' ? '确认后立即尝试预约。' : '确认后等待今天 12:30 放号，再自动尝试预约。'}`;
   if (relatedHistory(task).length) {
-    $('#confirmSummary').textContent += '\n\n此账号、项目、日期和时段有成功或待核对记录（可能来自其他方案）。请先使用“核对并生成剩余方案”。';
+    $('#confirmSummary').textContent += '\n\n此账号、项目、日期和时段有成功或待核对记录（可能来自其他预约）。请先使用“核对与重试”。';
   }
   $('#confirmSummary').style.whiteSpace = 'pre-line';
   $('#confirmError').textContent = '';
   const tooEarly = mode === 'release' && new Date(at + 8 * 3600_000).toISOString().slice(0, 10) !== model.date;
   $('#confirmRunButton').disabled = tooEarly;
-  $('#confirmRunButton').textContent = mode === 'now' ? '验证登录并立即尝试' : '验证登录并开始倒计时';
+  $('#confirmRunButton').textContent = '开始预约';
   $('#confirmLoginButton').hidden = true;
-  if (tooEarly) $('#confirmError').textContent = '方案已保存。请在放号当天登录并启动，无需提前守候。';
+  if (tooEarly) $('#confirmError').textContent = '预约已保存。请在放号当天登录并启动，无需提前守候。';
   $('#confirmDialog').showModal();
 }
 $('#confirmRunButton').addEventListener('click', async () => {
@@ -431,7 +426,7 @@ $('#confirmRunButton').addEventListener('click', async () => {
     if (model.startToken !== token) return;
     await api('/api/starts/cancel', 'POST', { token }).catch(() => { toast('取消启动未得到确认，请检查执行状态'); });
     const needsLogin = /登录|认证|Cookie|学校身份/.test(error.message);
-    $('#confirmError').textContent = `${error.message}。方案仍保留。${needsLogin ? '请更新登录后重新启动。' : ''}`;
+    $('#confirmError').textContent = `${error.message}。预约仍保留。${needsLogin ? '请更新登录后重新启动。' : ''}`;
     $('#confirmLoginButton').hidden = !needsLogin;
     // Refresh account status and identifiers after an unsuccessful start.
     await bootstrap().catch(() => {});
@@ -467,9 +462,9 @@ $('#taskList').addEventListener('click', async (event) => {
       if (job) await api(`/api/jobs/${job.id}/stop`, 'POST', {});
       await refreshJobs(); toast('已请求停止，等待在途请求结束');
     }
-    if (action === 'delete' && confirm(`删除方案“${task.name}”及本地日志？日志将移入本地回收目录；学校预约不会取消。`)) {
+    if (action === 'delete' && confirm(`删除预约“${task.name}”及本地日志？日志将移入本地回收目录；学校预约不会取消。`)) {
       const data = await api(`/api/tasks/${task.id}`, 'DELETE'); model.config = data.config;
-      await refreshJobs(); toast('方案已删除，日志已移入本地回收目录');
+      await refreshJobs(); toast('预约已删除，日志已移入本地回收目录');
     }
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
@@ -532,7 +527,12 @@ async function pollAuth() {
     $('#cancelAuthButton').disabled = data.auth.status === 'cancelling';
     $('#authProgress').textContent = data.auth.logs.slice(-5).map((line) => line.message).join('\n');
     if (active && data.auth.status !== 'awaiting_identity') pollAuth.timer = setTimeout(pollAuth, 1000);
-    else await refreshAccounts();
+    else {
+      await refreshAccounts();
+      if (data.auth.status === 'success' && model.createAfterLogin && $('#authDialog').open) {
+        model.createAfterLogin = false; $('#authDialog').close(); openTask();
+      }
+    }
   } catch (error) { $('#authProgress').textContent = error.message; }
 }
 $('#bindIdentityButton').onclick = async () => { const button = $('#bindIdentityButton'); button.disabled = true; try { await api('/api/auth/bind', 'POST', {}); await pollAuth(); } catch (error) { $('#authProgress').textContent = error.message; await pollAuth(); } finally { button.disabled = false; } };
@@ -593,8 +593,8 @@ $('#showAccountButton').addEventListener('click', (event) => authAction(event.cu
   $('#loginJsonExport').scrollIntoView({ block: 'center' });
 }));
 $('#quitAppButton').addEventListener('click', async () => {
-  if (!confirm('停止本次全部执行并退出助手？会等待已发出的请求返回，已成功预约保留。')) return;
-  try { await api('/api/app/quit', 'POST', {}); model.quitting = true; toast('执行已停止，助手已退出，可以关闭网页'); }
+  if (!confirm('停止本次全部执行并退出应用？会等待已发出的请求返回，已成功预约保留。')) return;
+  try { await api('/api/app/quit', 'POST', {}); model.quitting = true; toast('执行已停止，应用已退出，可以关闭网页'); }
   catch (error) { toast(error.message); }
 });
 
@@ -612,11 +612,11 @@ async function reviewTask(task, { jobId } = {}) {
     const acknowledged = await api(`/api/tasks/${taskId}/review`, 'POST', { reviewToken: review.reviewToken, confirm: 'NO_PENDING_ORDER' });
     model.jobs = acknowledged.jobs; jobDetails.clear(); renderTasks();
   }
-  if (!review.remainingTimes.length) return toast([review.reason, details].filter(Boolean).join('；') || '无需生成剩余方案');
-  if (!confirm(`${details}\n剩余：${review.remainingTimes.join('、')}\n生成一份新的剩余方案？保存后不会自动执行。`)) return;
+  if (!review.remainingTimes.length) return toast([review.reason, details].filter(Boolean).join('；') || '无需生成剩余预约');
+  if (!confirm(`${details}\n剩余：${review.remainingTimes.join('、')}\n生成一份新的剩余预约？保存后不会自动执行。`)) return;
   const data = await api('/api/tasks', 'POST', { ...task, projectId: task.projectId,
     name: `${task.name} · 剩余`, times: review.remainingTimes, bookingGoal: review.remainingGoal, sameCourtAnchor: review.sameCourtAnchor });
-  model.config = data.config; renderTasks(); toast('剩余方案已保存，原方案和结果保留');
+  model.config = data.config; renderTasks(); toast('剩余预约已保存，原预约和结果保留');
 }
 $('#notificationButton').onclick = async () => {
   model.notifications = !model.notifications;

@@ -7,7 +7,7 @@ import { parseSessionText } from '../../shared/session-format.js';
 
 // Use the browser's CAS session to obtain fresh venue cookies in an isolated
 // context. Never import another user's identity into the saved account.
-export async function renewVenueSessionFromBrowser({ expectedUserId, port = process.platform === 'win32' ? 9335 : 9334,
+export async function renewVenueSessionFromBrowser({ expectedUserId, port = 9335,
   signal, deadline, timeoutMs,
   connect = (url, options) => chromium.connectOverCDP(url, options) } = {}) {
   if (![9334, 9335, 9336, 9337, 9338].includes(port)) throw new SessionExpiredError('浏览器连接信息无效，请重新登录学校账号');

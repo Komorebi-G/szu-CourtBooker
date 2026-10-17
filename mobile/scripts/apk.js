@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { mkdir, copyFile, readdir, access } from 'node:fs/promises';
+import { mkdir, copyFile, readdir, access, readFile } from 'node:fs/promises';
+import { recordBuild } from '../../scripts/build-record.js';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { delimiter } from 'node:path';
@@ -29,4 +30,6 @@ await new Promise((resolve, reject) => {
 });
 await mkdir(join(root, '../dist'), { recursive: true });
 await copyFile(join(root, 'android/app/build/outputs/apk/debug/app-debug.apk'), join(root, '../dist/SZU-CourtBooker-Android.apk'));
+await recordBuild(join(root, '../dist'), { platform: 'android', filename: 'SZU-CourtBooker-Android.apk',
+  ...JSON.parse(await readFile(join(root, 'www/build.json'), 'utf8')) });
 console.log('已生成 dist/SZU-CourtBooker-Android.apk（开发签名测试版）');

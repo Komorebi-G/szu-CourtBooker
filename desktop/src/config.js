@@ -1,10 +1,10 @@
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import YAML from 'yaml';
-import { randomUUID } from 'node:crypto';
 import { DEFAULT_CONFIG_FILE, MODE_CODES } from '../../shared/constants.js';
 import { validateBookingGoal } from '../../shared/booking-goal.js';
 import { releaseEpoch, resolveDate, splitTimeSlot } from '../../shared/utils.js';
+import { atomicWrite } from './atomic-file.js';
 
 const defaults = {
   scheduler: {
@@ -93,8 +93,6 @@ export function validateConfig(config) {
 export async function saveConfig(config, path = DEFAULT_CONFIG_FILE) {
   validateConfig(config);
   const absolute = resolve(path);
-  const temporary = `${absolute}.${randomUUID()}.tmp`;
   const source = YAML.stringify(config, { lineWidth: 0 });
-  await writeFile(temporary, source, 'utf8');
-  await rename(temporary, absolute);
+  await atomicWrite(absolute, source);
 }

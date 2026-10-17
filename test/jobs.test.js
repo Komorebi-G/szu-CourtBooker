@@ -236,6 +236,19 @@ test('首单意图预写后进程崩溃，发送标记使核对仍能识别未�
   assert.equal(await exists(join(f.dir, 'dispatch.json')), false);
 });
 
+test('学校确认未知请求成功后，桌面记录补上具体成功时段且刷新不重复计数', async () => {
+  const f = await fixture(), requestId = '2026-10-12|19:00-20:00';
+  const pendingRequests = { [requestId]: { date: '2026-10-12', time: '19:00-20:00', sentAt: new Date().toISOString(), room: { WID: 'A', CDMC: 'A场' } } };
+  await writeJson(join(f.dir, 'state.json'), { status: 'interrupted', logs: [], successes: [], pendingRequests });
+  const review = { requestId, reviewResult: 'booked', schoolSlot: { date: '2026-10-12', time: '19:00-20:00', courtId: 'A', court: 'A场', sportCode: '001' } };
+  await f.store.recordReview(f.id, { resolvedRequests: [review], reviewedOutcome: 'success' });
+  await f.store.recordReview(f.id, { resolvedRequests: [review], reviewedOutcome: 'success' });
+  const state = await f.store.get(f.id);
+  assert.equal(state.successes.length, 1); assert.equal(state.successes[0].time, '19:00-20:00');
+  assert.equal(state.successes[0].court, 'A场'); assert.equal(state.successes[0].confirmed, true);
+  assert.equal(Object.keys(state.pendingRequests).length, 0);
+});
+
 test('历史轮询摘要省略大日志并复用未变化记录，状态变更会刷新缓存', async (t) => {
   const f = await fixture();
   await writeJson(join(f.dir, 'state.json'), { status: 'success', successes: [{ orderId: 'known' }],

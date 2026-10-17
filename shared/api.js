@@ -17,12 +17,43 @@ export class SzuVenueApi {
   constructor(client) {
     this.client = client;
     this.identity = null;
+    this.identityBinding = this.loginBinding();
+    this.clockSamples = [];
   }
 
-  async getIdentity({ refresh = false, signal, deadline, timeoutMs } = {}) {
-    if (this.identity && !refresh) return this.identity;
-    const { data: html } = await this.client.get('index.do', { expect: 'text', signal, deadlineMs: deadline,
+  rememberClock(response) {
+    const sample = { serverDateMs: Date.parse(response.date), startedAt: response.startedAt, endedAt: response.endedAt, age: response.age };
+    if (serverClockInterval(sample).valid) this.clockSamples = [...this.clockSamples, sample].slice(-2);
+  }
+  getRecentServerClockSamples() { return this.clockSamples; }
+  getRequestGate() { return this.client.getRequestGate?.(); }
+
+  checkQuery(response) {
+    const data = response.data;
+    if (typeof data?.code === 'string' && data.code !== '0') {
+      const outcome = { ...classifyBookingResponse(data), code: data.code,
+        policyObserved: response.policyObserved, retryAt: response.retryAt };
+      if (/登录|身份认证/.test(outcome.message ?? '')) throw new SessionExpiredError(outcome.message);
+      throw new SchoolQueryError(outcome);
+    }
+    return data;
+  }
+
+  loginBinding() {
+    // _WEU is rotated by normal school queries. The CAS ticket binds the
+    // authenticated user; rotating application cookies is not a user switch.
+    const tickets = this.client.session?.cookies?.filter(cookie => cookie.name === 'MOD_AUTH_CAS');
+    return tickets?.length ? JSON.stringify(tickets.map(({ value, domain, path }) => [value, domain, path]).sort()) : this.client.cookieRevision;
+  }
+
+  async getIdentity({ refresh = false, maxAgeMs = 0, signal, deadline, timeoutMs } = {}) {
+    const age = Date.now() - this.identityCheckedAt;
+    const sameCookies = this.identityBinding === this.loginBinding();
+    if (this.identity && sameCookies && (!refresh || maxAgeMs > 0 && age >= 0 && age <= maxAgeMs)) return this.identity;
+    const response = await this.client.get('index.do', { expect: 'text', signal, deadlineMs: deadline,
       timeoutMs, abortInFlight: true });
+    this.rememberClock(response);
+    const html = response.data;
     const id = /\bUSERID='([^']+)'/.exec(html)?.[1];
     const infoText = /\bUSER_INFO=(\{.*?\});APP_TITLE=/.exec(html)?.[1];
     let info;
@@ -34,36 +65,43 @@ export class SzuVenueApi {
     if (!id || !info?.userName) throw new SessionExpiredError('预约首页没有有效的用户身份，请重新登录');
     if (this.identity && this.identity.id !== id) throw new SessionExpiredError('登录身份已改变，请重新登录原账号后启动');
     this.identity = { id, name: info.userName };
+    this.client.bindIdentity?.(id);
+    this.identityCheckedAt = Date.now();
+    this.identityBinding = this.loginBinding();
     return this.identity;
   }
 
   async getSportVenueData({ signal, deadline, timeoutMs } = {}) {
-    return (await this.client.post('sportVenue/getSportVenueData.do', {}, {
+    const response = await this.client.post('sportVenue/getSportVenueData.do', {}, {
       signal, deadlineMs: deadline, timeoutMs, abortInFlight: true,
-    })).data;
+    });
+    this.rememberClock(response); return this.checkQuery(response);
   }
 
-  async getAvailableDates({ signal, deadline, timeoutMs } = {}) {
-    return (await this.client.post('sportVenue/getRqList.do', {}, {
-      signal, deadlineMs: deadline, timeoutMs, abortInFlight: true,
-    })).data;
+  async getAvailableDates({ signal, deadline, timeoutMs, onWait } = {}) {
+    const dates = this.checkQuery(await this.client.post('sportVenue/getRqList.do', {}, {
+      signal, deadlineMs: deadline, timeoutMs, onWait, abortInFlight: true,
+    }));
+    if (!Array.isArray(dates)) {
+      throw new Error('日期接口响应格式异常：缺少日期数组，尚不能确认预约登录有效');
+    }
+    return dates;
   }
 
-  async getTimeList({ campusCode, date, modeCode, sportCode, signal, deadline, timeoutMs }) {
-    const rows = (await this.client.post('sportVenue/getTimeList.do', {
+  async getTimeList({ campusCode, date, modeCode, sportCode, signal, deadline, timeoutMs, onWait }) {
+    const rows = this.checkQuery(await this.client.post('sportVenue/getTimeList.do', {
       XQ: campusCode,
       YYRQ: date,
       YYLX: modeCode,
       XMDM: sportCode,
-    }, { signal, deadlineMs: deadline, timeoutMs, abortInFlight: true })).data;
+    }, { signal, deadlineMs: deadline, timeoutMs, onWait, abortInFlight: true }));
     if (!Array.isArray(rows)) {
-      if (typeof rows?.code === 'string' && rows.code !== '0') throw new SchoolQueryError(classifyBookingResponse(rows));
       throw new Error('时段接口响应格式异常：缺少时段数组');
     }
     return rows;
   }
 
-  async getOpeningRooms({ campusCode, date, modeCode, sportCode, venueCode, time, signal, deadline, timeoutMs }) {
+  async getOpeningRooms({ campusCode, date, modeCode, sportCode, venueCode, time, signal, deadline, timeoutMs, onWait }) {
     const [start, end] = time.split('-');
     const form = {
       XMDM: sportCode,
@@ -74,12 +112,12 @@ export class SzuVenueApi {
       XQDM: campusCode,
     };
     if (venueCode) form.CGBM = venueCode;
-    const response = (await this.client.post('modules/sportVenue/getOpeningRoom.do', form, {
-      signal, deadlineMs: deadline, timeoutMs, abortInFlight: true,
-    })).data;
+    const response = this.checkQuery(await this.client.post('modules/sportVenue/getOpeningRoom.do', form, {
+      signal, deadlineMs: deadline, timeoutMs, onWait, abortInFlight: true,
+    }));
     if (!response || typeof response !== 'object') throw new Error('场地接口响应格式异常');
     if (response.code !== '0') {
-      throw new SchoolQueryError(classifyBookingResponse(response));
+      throw new Error('场地接口响应格式异常：缺少明确业务码');
     }
     const rows = response.datas?.getOpeningRoom?.rows;
     if (!Array.isArray(rows) || rows.some((row) => !row || typeof row.WID !== 'string' || !row.WID.trim()
@@ -98,7 +136,7 @@ export class SzuVenueApi {
     });
   }
 
-  async book({ date, modeCode, room, time, deadline, signal, requestId, requestMetadata, onDispatch, beforeDispatch }) {
+  async book({ date, modeCode, room, time, deadline, dispatchBefore, signal, requestId, requestMetadata, onDispatch, beforeDispatch, intervalMs, onWait }) {
     if (!room || ['WID', 'CGBM', 'XMDM', 'XQDM'].some((field) => typeof room[field] !== 'string' || !room[field].trim())) {
       throw new RequestNotSentError('预约场地缺少有效的场地、场馆、项目或校区信息，未发送请求');
     }
@@ -129,8 +167,15 @@ export class SzuVenueApi {
         YYKS: `${date} ${start}`,
         YYJS: `${date} ${end}`,
         PC_OR_PHONE: 'pc',
-      }, { deadlineMs: deadline, signal, requestId, requestMetadata, onDispatch, beforeDispatch });
+      }, { deadlineMs: Number.isFinite(dispatchBefore) ? Math.min(deadline ?? Infinity, dispatchBefore) : deadline,
+        signal, requestId, requestMetadata, onDispatch, beforeDispatch, intervalMs, onWait });
     } catch (error) {
+      // A native dispatch can be delayed after the JS queue has yielded. Its
+      // deadline only prevents sending; it must not shorten an in-flight POST.
+      if (error.code === 'REQUEST_NOT_SENT' && Number.isFinite(dispatchBefore) && Date.now() >= dispatchBefore
+        && Date.now() < (deadline ?? Infinity) && !signal?.aborted) {
+        error.bookingResponse ??= { code: 'LOCAL_REFRESH_REQUIRED', msg: '快速提交窗口已结束，重新查询空位' };
+      }
       if (!error.requestResult) throw error;
       request = error.requestResult;
       persistenceError = error.message;
@@ -141,16 +186,19 @@ export class SzuVenueApi {
       throw new Error('预约接口未返回明确业务结果，结果待确认，请核对学校“我的预约”');
     }
     return { ...response, ...(persistenceError ? { persistenceError } : {}), requestTiming: { httpStatus: request.status,
-      startedAt: request.startedAt, durationMs: Date.now() - request.startedAt } };
+      startedAt: request.startedAt, endedAt: request.endedAt,
+      transportQueueMs: request.queueMs ?? 0, durationMs: (request.endedAt ?? Date.now()) - request.startedAt,
+      headersEndedAt: request.headersEndedAt, cooldownMs: request.cooldownMs, retryAt: request.retryAt, policyObserved: request.policyObserved,
+      ...request.nativeTiming } };
   }
 
   async getBookings({ pageNumber = 1, pageSize = 20, signal, deadline, timeoutMs } = {}) {
-    const response = (await this.client.post('modules/myBooking/myBookingInfo.do', {
+    const response = this.checkQuery(await this.client.post('modules/myBooking/myBookingInfo.do', {
       pageNumber,
       pageSize,
-    }, { signal, deadlineMs: deadline, timeoutMs, abortInFlight: true })).data;
+    }, { signal, deadlineMs: deadline, timeoutMs, abortInFlight: true }));
     const data = response?.datas?.myBookingInfo;
-    if ((response?.code !== undefined && response.code !== '0') || !Array.isArray(data?.rows)
+    if (response?.code !== '0' || !Array.isArray(data?.rows)
       || !(typeof data?.totalSize === 'number' || (typeof data?.totalSize === 'string' && /^\d+$/.test(data.totalSize)))
       || !Number.isSafeInteger(Number(data.totalSize)) || Number(data.totalSize) < data.rows.length
       || data.rows.some((row) => !row || typeof row !== 'object' || Array.isArray(row))) {
@@ -159,20 +207,25 @@ export class SzuVenueApi {
     return { rows: data.rows, totalSize: Number(data.totalSize) };
   }
 
-  async getAllBookings({ signal, deadline, timeoutMs } = {}) {
+  async getAllBookings({ signal, deadline, timeoutMs, pageSize = 100 } = {}) {
+    if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 500) throw new Error('预约记录分页大小无效');
     const rows = [];
     const pageSignatures = new Set();
     const rowSignatures = new Set();
     let total;
     for (let page = 1; page <= 50; page++) {
-      const data = await this.getBookings({ pageNumber: page, pageSize: 100, signal, deadline, timeoutMs });
+      const data = await this.getBookings({ pageNumber: page, pageSize, signal, deadline, timeoutMs });
+      // Some school deployments cap the requested page size. The first page
+      // starts at zero, so follow its actual size without skipping any rows.
+      if (page === 1 && data.rows.length && data.rows.length < pageSize && data.rows.length < data.totalSize) pageSize = data.rows.length;
       if (total !== undefined && total !== data.totalSize) throw new Error('预约记录在翻页期间发生变化，请重新核对');
       total = data.totalSize;
       const signature = JSON.stringify(data.rows);
       if (data.rows.length && pageSignatures.has(signature)) throw new Error('学校重复返回同一页预约记录，不能确认记录完整');
       pageSignatures.add(signature);
       for (const row of data.rows) {
-        const rowSignature = JSON.stringify(Object.fromEntries(Object.keys(row).sort().map((key) => [key, row[key]])));
+        const rowSignature = typeof row.WID === 'string' && row.WID.trim() ? `id:${row.WID}`
+          : `row:${JSON.stringify(Object.fromEntries(Object.keys(row).sort().map((key) => [key, row[key]])))}`;
         if (rowSignatures.has(rowSignature)) throw new Error('学校重复返回预约记录，不能确认分页记录完整');
         rowSignatures.add(rowSignature);
       }
@@ -196,6 +249,7 @@ export class SzuVenueApi {
       signal, deadlineMs: deadline, timeoutMs: Math.min(timeoutMs, remaining), abortInFlight: true,
     });
     signal?.throwIfAborted();
+    this.checkQuery(response);
     return { serverDateMs: response.date ? Date.parse(response.date) : NaN,
       startedAt: response.startedAt, endedAt: response.endedAt, age: response.age };
   }

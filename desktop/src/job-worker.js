@@ -38,7 +38,7 @@ export async function executeJob(dir, options = {}) {
   }
 }
 
-async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = false, stopSignal, referenceReader,
+async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = false, stopSignal, referenceReader, cachedRoomsReader,
   submit = (operation) => operation(), onFatal = () => {}, onIdentity = () => {}, createApi = async (path) => {
   const client = await HttpClient.create({ sessionPath: path });
   return { client, api: new SzuVenueApi(client) };
@@ -62,7 +62,7 @@ async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = 
   let journalPending = Promise.resolve();
   let persistenceError;
   let logPersistTimer;
-  let preparedAttempt;
+  const preparedAttempts = new Map();
   const storageFailed = (error) => {
     if (persistenceError) return;
     persistenceError = error; controller.abort(); onFatal(error);
@@ -112,6 +112,16 @@ async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = 
     const metadata = await api.getSportVenueData({ signal });
     signal.throwIfAborted();
     const targets = resolveTargets(job.config, metadata);
+    let knownRooms = [];
+    if (job.mode === 'release' && cachedRoomsReader) {
+      try {
+        knownRooms = (await Promise.all(targets.map(target => cachedRoomsReader({ target,
+          accountId: job.accountId ?? 'default' })))).flat();
+      } catch (error) {
+        log('WARN', '已保存的场地结构暂不可读，改用实时查询', { message: error.message });
+      }
+      signal.throwIfAborted();
+    }
     state.quotaScope = { account,
       sport: targets[0].sportCode, date: job.config.targets[0].date };
     // Compare every POST field: a refreshed catalog or a changed candidate
@@ -122,26 +132,22 @@ async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = 
     const onPreparedAttempt = async (input) => {
       signal.throwIfAborted();
       const key = `${input.date}|${input.time}`;
-      if (preparedAttempt && state.pendingRequests[preparedAttempt.key] === preparedAttempt.intent) {
-        delete state.pendingRequests[preparedAttempt.key];
-      }
       const intent = { date: input.date, time: input.time, modeCode: input.modeCode,
         attemptId: randomUUID(), room: structuredClone(input.room), deadline: input.deadline, preparedAt: new Date().toISOString() };
       state.pendingRequests[key] = intent;
-      preparedAttempt = { key, signature: attemptSignature(input), intent, durable: persist() };
-      await preparedAttempt.durable;
+      const prepared = { key, signature: attemptSignature(input), intent, durable: persist() };
+      preparedAttempts.set(key, prepared);
+      await prepared.durable;
       signal.throwIfAborted();
     };
     const wrapper = withBooking(api, (input) => submit(async () => {
       if (signal.aborted) throw new RequestNotSentError('本次执行已停止，未发送请求');
       if (Date.now() >= input.deadline) return { code: 'EXPIRED', msg: '执行窗口已结束' };
       const key = `${input.date}|${input.time}`;
-      const prepared = preparedAttempt?.signature === attemptSignature(input)
-        && state.pendingRequests[key] === preparedAttempt.intent ? preparedAttempt : null;
-      if (preparedAttempt && !prepared && state.pendingRequests[preparedAttempt.key] === preparedAttempt.intent) {
-        delete state.pendingRequests[preparedAttempt.key];
-      }
-      preparedAttempt = undefined;
+      const cached = preparedAttempts.get(key);
+      const prepared = cached?.signature === attemptSignature(input)
+        && state.pendingRequests[key] === cached.intent ? cached : null;
+      preparedAttempts.delete(key);
       state.pendingRequests[key] = { ...(prepared?.intent ?? {}), date: input.date, time: input.time,
         attemptId: prepared?.intent.attemptId ?? randomUUID(),
         modeCode: input.modeCode, room: structuredClone(input.room), deadline: input.deadline,
@@ -204,10 +210,10 @@ async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = 
     const result = await runBooking({ api: wrapper, client, config: job.config, targets,
       date: job.config.targets[0].date, immediate: job.mode === 'now', live: job.mode !== 'check',
       releaseAtServer: job.mode === 'release' ? job.releaseAt : undefined, signal, log,
-      onPreparedAttempt,
+      onPreparedAttempt, knownRooms,
       resetDurationOnStart: job.mode === 'now',
       quota, quotaAccount: account,
-      loadSchoolBookings: (options) => api.getAllBookings(options),
+      loadSchoolBookings: (options) => api.getAllBookings({ ...options, pageSize: 500 }),
       readReference: referenceReader ? (input) => referenceReader({ ...input, accountId: job.accountId ?? 'default' }) : undefined,
       onSuccess: async (success) => {
         if (success.reused && !state.successes.some((s) => s.date === success.task.date && s.time === success.task.time)) {
@@ -240,8 +246,8 @@ async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = 
     clearTimeout(logPersistTimer);
     // An unused warmup intent was never submitted. A consumed intent stays in
     // pendingRequests on unknown outcomes so interruption remains reviewable.
-    if (preparedAttempt && state.pendingRequests[preparedAttempt.key] === preparedAttempt.intent) {
-      delete state.pendingRequests[preparedAttempt.key];
+    for (const prepared of preparedAttempts.values()) if (state.pendingRequests[prepared.key] === prepared.intent) {
+      delete state.pendingRequests[prepared.key];
     }
     await Promise.allSettled([pending, journalPending]);
     if (persistenceError) {

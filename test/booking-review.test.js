@@ -41,6 +41,49 @@ test('取消或退款处理中、失败及未取消不能当成已经释放名�
   const result = review([row(undefined, { YYZT_DISPLAY: ' 已支付 ' })]);
   assert.equal(result.booked.length, 1, '学校状态的空白字符不改变含义');
 });
+test('学校原始取消状态 CG_QX 不受中文标签影响，也不要求已取消订单保留完整字段', () => {
+  const result = review([
+    row(undefined, { YYZT: 'CG_QX', YYZT_DISPLAY: '取消预约' }),
+    { YYZT: 'CG_QX' },
+  ]);
+  assert.equal(result.unresolved.length, 0);
+  assert.deepEqual(result.remainingTimes, plan.times);
+  assert.equal(result.dailyTimes.length, 0);
+});
+test('学校 YYSJD 的日期、秒数和空白按同一时段核对，不把有效订单变成未知字段', () => {
+  for (const YYSJD of ['2026-10-01 19:00-20:00', '2026-10-01 19:00:00 - 20:00:00',
+    '2026/10/01 19:00:00 - 2026/10/01 20:00:00', '2026-10-01 19:00~2026-10-01 20:00']) {
+    const result = review([row(undefined, { YYRQ: undefined, KYYSJD: '', YYSJD })]);
+    assert.equal(result.unresolved.length, 0, YYSJD);
+    assert.equal(result.booked[0].time, plan.times[0]);
+    assert.deepEqual(result.remainingTimes, plan.times.slice(1));
+    assert.equal(result.remainingGoal, 'one');
+  }
+});
+test('历史订单从 YYSJD 识别日期后排除；原始完成状态 CG_WC 可核实当前订单', () => {
+  const result = review([
+    { KYYSJD: '19:00-20:00', YYSJD: '2026-09-30 19:00~2026-09-30 20:00', YYZT: '旧状态', XMDM: '001' },
+    row(undefined, { YYRQ: undefined, YYSJD: '2026-10-01 19:00~2026-10-01 20:00', YYZT: 'CG_WC', YYZT_DISPLAY: undefined }),
+  ]);
+  assert.equal(result.unresolved.length, 0);
+  assert.equal(result.booked.length, 1);
+  assert.deepEqual(result.remainingTimes, plan.times.slice(1));
+});
+test('学校真实已预约行：仅 YYSJD、CG_YY 和 CDWID_DISPLAY，也可核对并生成剩余一段', () => {
+  const result = review([{ YYSJD: '2026-10-01 19:00~2026-10-01 20:00', YYZT: 'CG_YY',
+    XMDM: '001', XMDM_DISPLAY: '羽毛球', CDWID: 'C', CDWID_DISPLAY: 'C场', CGDM: 'venue', XQWID: '1', YYLX: '1.0' }]);
+  assert.equal(result.unresolved.length, 0);
+  assert.equal(result.booked[0].court, 'C场');
+  assert.deepEqual(result.remainingTimes, plan.times.slice(1));
+  assert.equal(result.remainingGoal, 'one');
+});
+test('确实无法识别的当前学校记录说明具体缺失项，不能当成没有订单', () => {
+  const result = review([{ YYRQ: plan.date, YYSJD: '时间未知', YYZT: '新状态' }]);
+  assert.equal(result.booked.length, 0);
+  assert.match(result.unresolved[0].reason, /时段无法识别/);
+  assert.match(result.unresolved[0].reason, /缺少项目/);
+  assert.match(result.unresolved[0].reason, /新状态/);
+});
 test('缺少项目/日期/场地身份的记录不能凭空确认目标完成', () => {
   const result = review([row(undefined, { XMDM: undefined }), row('20:00-21:00', { YYRQ: undefined }),
     row('21:00-22:00', { CDWID: undefined, CDMC: undefined })]);
@@ -111,10 +154,10 @@ test('目标和相邻场地信息须校验，连续两段必须有可行候选',
   assert.throws(() => validateBookingGoal({ ...plan, sameCourtAnchor: { date: '2026-10-02', time: plan.times[0], court: 'C场' } }), /无效/);
 });
 test('学校查询缺少业务结果/分页字段时绝不能默认空订单', async () => {
-  for (const data of [{}, { code: '1', datas: { myBookingInfo: { rows: [], totalSize: 0 } } },
+  for (const data of [{}, { datas: { myBookingInfo: { rows: [], totalSize: 0 } } }, { code: '1', datas: { myBookingInfo: { rows: [], totalSize: 0 } } },
     ...[undefined, null, ''].map((totalSize) => ({ datas: { myBookingInfo: { rows: [], totalSize } } }))]) {
     const api = new SzuVenueApi({ async post() { return { data }; } });
-    await assert.rejects(api.getAllBookings(), /不能据此认定/);
+    await assert.rejects(api.getAllBookings(), /不能据此认定|业务码/);
   }
 });
 test('学校分页完整读取；重复页、数量变化和缺页都报错', async () => {

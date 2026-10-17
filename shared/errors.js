@@ -14,13 +14,14 @@ export class HttpResponseError extends Error {
 
 export class SchoolQueryError extends Error {
   constructor(outcome) {
-    super(outcome.message);
+    super(`${outcome.message}${outcome.code && !outcome.message?.includes(`业务码 ${outcome.code}`) ? `（业务码 ${outcome.code}）` : ''}`);
     this.outcome = outcome;
   }
 }
 
 export function isTransientQueryError(error) {
-  return [408, 425, 429, 500, 502, 503, 504].includes(error.status)
+  return ['rate', 'server'].includes(error.outcome?.scope)
+    || [408, 425, 429, 500, 502, 503, 504].includes(error.status)
     || ['TimeoutError', 'TypeError'].includes(error.name)
     || ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'NETWORK_ERROR'].includes(error.code)
     || ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN'].includes(error.cause?.code);

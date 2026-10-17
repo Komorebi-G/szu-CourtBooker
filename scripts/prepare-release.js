@@ -7,10 +7,21 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 const exec = promisify(execFile);
 const root = resolve('.'), output = join(root, 'dist/release');
+const version = JSON.parse(await readFile('package.json', 'utf8')).version;
+const records = await Promise.all(['windows', 'android'].map(async platform => {
+  const record = JSON.parse(await readFile(`dist/${platform}-build.json`, 'utf8'));
+  const hash = createHash('sha256').update(await readFile(join('dist', record.filename))).digest('hex');
+  if (record.platform !== platform || record.version !== version || record.sha256 !== hash) {
+    throw new Error(`${platform} 构建与当前版本不一致，请先构建两端，禁止混用旧发行包`);
+  }
+  return record;
+}));
 await mkdir(output, { recursive: true });
-const assets = ['SZU-CourtBooker-Windows-x64.exe', 'SZU-CourtBooker-Android-debug.apk', 'LICENSES.zip'];
+const assets = ['SZU-CourtBooker-Windows-x64.exe', 'SZU-CourtBooker-Android-debug.apk', 'LICENSES.zip', 'release.json'];
 await copyFile('dist/SZU-CourtBooker.exe', join(output, assets[0]));
 await copyFile('dist/SZU-CourtBooker-Android.apk', join(output, assets[1]));
+await writeFile(join(output, 'release.json'), JSON.stringify({ version, preparedAt: new Date().toISOString(),
+  artifacts: records.map((record, index) => ({ ...record, filename: assets[index] })) }, null, 2) + '\n');
 const staging = await mkdtemp(join(tmpdir(), 'szu-release-licenses-'));
 for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md']) await copyFile(file, join(staging, file));
 async function collect(dir, destination) {

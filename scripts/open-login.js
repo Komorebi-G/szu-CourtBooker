@@ -153,7 +153,7 @@ if (isWsl && await exists(edgeScript) && preference === 'edge' && !process.env.S
   const temporary = await mkdtemp(join(tmpdir(), 'szu-booker-browser-'));
   const environment = { ...process.env, WSL_EDGE_SESSION: 'szu-court-booker-auth' };
   try {
-    await waitForChild(spawn(process.execPath, [edgeScript, 'open', url], {
+    await waitForChild(spawn(process.execPath, [edgeScript, 'preview', url], {
       stdio: 'inherit', cwd: temporary, env: environment,
     }));
     await waitForChild(spawn(process.execPath, [edgeScript, 'detach'], {

@@ -26,11 +26,12 @@ export class LiveExecution {
   active = new Map();
   queues = new Map();
   haltedAccounts = new Map();
-  quota = new BookingQuota();
+  accountStops = new Map();
+  quota = this.createQuota();
   closing = false;
   failures = new Map();
   startSequence = 0;
-  constructor({ dataDir, createApi, renewSession, referenceReader } = {}) {
+  constructor({ dataDir, createApi, renewSession, referenceReader, cachedRoomsReader } = {}) {
     this.createApi = createApi ?? (async (path, _signal, expectedUserId) => {
       const client = await HttpClient.create({ sessionPath: path, expectedUserId, renewSession, priority: 'critical' });
       return { client, api: new SzuVenueApi(client) };
@@ -38,6 +39,16 @@ export class LiveExecution {
     this.dataDir = dataDir;
     const catalogs = dataDir ? new ReferenceCatalogStore(dataDir) : null;
     this.referenceReader = referenceReader ?? (catalogs ? (input) => catalogs.read(input) : undefined);
+    this.cachedRoomsReader = cachedRoomsReader ?? (catalogs ? (input) => catalogs.cachedRooms(input) : undefined);
+  }
+  createQuota() {
+    return new BookingQuota({ onAccountStop: (account, message) => {
+      // Preserve the stop for already-started plans whose identity read is
+      // still pending. A later explicit start belongs to a new account run.
+      this.accountStops.set(account, Object.assign(new Error(message), {
+        code: 'EXECUTION_HALTED', stopThrough: this.startSequence,
+      }));
+    } });
   }
   claim() {
     if (!this.dataDir || this.lockToken) return;
@@ -88,19 +99,26 @@ export class LiveExecution {
     if (this.active.has(dir)) throw new Error('本次执行已启动');
     this.claim();
     if (!this.active.size) {
-      this.quota = new BookingQuota();
+      this.quota = this.createQuota();
       this.queues.clear();
       this.haltedAccounts.clear();
+      this.accountStops.clear();
     }
     const controller = new AbortController();
     const sequence = ++this.startSequence;
     const work = executeJob(dir, { manualStart: true, stopSignal: controller.signal, quota: this.quota,
       createApi: this.createApi,
       referenceReader: this.referenceReader,
+      cachedRoomsReader: this.cachedRoomsReader,
       onFatal: (error) => this.halt(error),
       onIdentity: (account) => {
         const entry = this.active.get(dir);
         if (entry) entry.account = account;
+        const stopped = this.accountStops.get(account);
+        if (stopped && sequence <= stopped.stopThrough) controller.abort(stopped);
+        else if (![...this.active].some(([otherDir, other]) => otherDir !== dir && other.account === account)) {
+          this.quota.resetAccount(account);
+        }
         const reason = this.haltedAccounts.get(account);
         if (reason && sequence <= reason.stopThrough) controller.abort(reason);
       },

@@ -1,8 +1,15 @@
 import { DEFAULT_SESSION_FILE } from '../../shared/constants.js';
 import { loadSession, saveSession, withSession } from './session.js';
-import { CoreHttpClient } from '../../shared/http-client-core.js';
+import { CoreHttpClient, isReadOnlySchoolRequest } from '../../shared/http-client-core.js';
 import { SessionExpiredError, RequestNotSentError } from '../../shared/errors.js';
+import { RequestGate } from '../../shared/request-gate.js';
+import { resolve } from 'node:path';
 export { SessionExpiredError } from '../../shared/errors.js';
+const gates = new Map();
+function gateFor(key) {
+  if (!gates.has(key)) gates.set(key, new RequestGate());
+  return gates.get(key);
+}
 
 export class HttpClient extends CoreHttpClient {
   constructor(session, { sessionPath = DEFAULT_SESSION_FILE, timeoutMs = 5000, persistRequests = false,
@@ -13,8 +20,19 @@ export class HttpClient extends CoreHttpClient {
     this.renewSession = renewSession;
     this.expectedUserId = expectedUserId;
     this.priority = priority;
+    this.requestGate = gateFor(expectedUserId ? `user:${expectedUserId}` : `file:${resolve(sessionPath)}`);
+  }
+  bindIdentity(id) {
+    const gate = gateFor(`user:${id}`); gate.absorb(this.requestGate); this.requestGate = gate;
   }
   async request(path, options = {}) {
+    // Session-file locks alone cannot serialize aliases of the same school
+    // account. Hold its shared mutation queue through body/cookie persistence.
+    const mutation = /\/(?:insertVenueBookingInfo|cancelSelectBookingInfo)\.do(?:\?|$)/.test('/' + path);
+    return mutation ? this.requestGate.runMutation(() => this.requestTransaction(path, options))
+      : this.requestTransaction(path, options);
+  }
+  async requestTransaction(path, options = {}) {
     if (!this.persistRequests) return super.request(path, options);
     const send = () => withSession(this.sessionPath, async (session, save, queueSignal) => {
       this.session = session;
@@ -38,10 +56,10 @@ export class HttpClient extends CoreHttpClient {
     }, { priority: options.priority ?? this.priority, signal: options.signal, cancellable: options.abortInFlight });
     try { return await send(); }
     catch (error) {
-      // The identity GET is read-only. Never replay a booking POST after a
+      // Only known read-only endpoints may be recovered and replayed. Never replay a booking POST after a
       // redirect or network error, because its result may be unknown.
-      if (!(error instanceof SessionExpiredError) || path !== 'index.do'
-        || options.method !== 'GET' || !this.renewSession || options.signal?.aborted) throw error;
+      const readOnly = isReadOnlySchoolRequest(path, options.method);
+      if (!(error instanceof SessionExpiredError) || !readOnly || !this.renewSession || options.signal?.aborted) throw error;
       const failedSession = JSON.stringify(this.session);
       await withSession(this.sessionPath, async (current, save, queueSignal) => {
         // A concurrent identity check may have recovered this file already.

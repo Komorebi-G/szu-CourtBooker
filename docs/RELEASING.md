@@ -1,6 +1,6 @@
 # 发布流程
 
-1. 更新根目录与 `mobile/` 的包版本及 lockfile、Android `versionCode` / `versionName`、`docs/releases/` 说明。
+1. 更新根目录与 `mobile/` 的包版本及 lockfile、Android `versionCode` / `versionName`。发行说明写入 GitHub Release，工作区不新增逐版本总结。
 2. 从干净依赖安装验证 `npm ci`、`npm run check` 和 `npm ci --prefix mobile`。构建手机资源及两端安装包。
 3. 在具备 `curl` 和 `zip` 的 Linux / WSL 环境运行 `node scripts/prepare-release.js`，输出 `dist/release/` 中的明确附件清单与 SHA-256。该脚本会读取本机已安装依赖的许可证，以及下载 Node 对应版本与 Android 组件的官方 LICENSE；需联网。临时许可证目录保留在系统临时目录供检查。
 4. 初始化或更新 Git，检查 `git status --short`、`git diff --cached --stat`。确认 `.session.json`、`.data/`、`config.yaml`、签名密钥、截图和日志没有被跟踪。

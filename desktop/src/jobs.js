@@ -1,25 +1,14 @@
-import { mkdir, readFile, writeFile, rename, readdir, access, rm, stat, open } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, readdir, access, rm, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { executionIntent } from '../../shared/runner.js';
 import { isProcessOwnerAsync, processOwner } from './process-owner.js';
 import { pendingExecutionRequests } from '../../shared/experience.js';
+import { atomicWrite } from './atomic-file.js';
 
 export const JOB_ACTIVE = ['scheduled', 'queued', 'preparing', 'checking', 'waiting', 'booking', 'stopping'];
 export async function writeJson(path, value, { durable = false } = {}) {
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  try {
-    if (durable) {
-      const file = await open(temporary, 'wx', 0o600);
-      try { await file.writeFile(JSON.stringify(value, null, 2)); await file.sync(); }
-      finally { await file.close(); }
-    } else await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 });
-    await rename(temporary, path);
-    if (durable && process.platform !== 'win32') {
-      const directory = await open(dirname(path), 'r');
-      try { await directory.sync(); } finally { await directory.close(); }
-    }
-  } finally { await rm(temporary, { force: true }).catch(() => {}); }
+  await atomicWrite(path, JSON.stringify(value, null, 2), { durable });
 }
 export const readJson = async (path) => JSON.parse(await readFile(path, 'utf8'));
 export const exists = async (path) => access(path).then(() => true, () => false);
@@ -127,6 +116,17 @@ export class JobStore {
     const ids = resolvedRequests.map((value) => typeof value === 'string' ? value : value.requestId);
     for (let index = 0; index < ids.length; index++) {
       const requestId = ids[index], original = state.pendingRequests[requestId];
+      const resolution = resolvedRequests[index];
+      if (original && resolution?.reviewResult === 'booked' && resolution.schoolSlot) {
+        const slot = resolution.schoolSlot;
+        state.successes ??= [];
+        if (!state.successes.some((success) => success.date === slot.date && success.time === slot.time)) {
+          state.successes.push({ date: slot.date, time: slot.time, court: slot.court, confirmed: true,
+            room: { ...original.room, WID: slot.courtId ?? original.room?.WID, CDMC: slot.court,
+              XMDM: slot.sportCode ?? original.room?.XMDM, CGBM: slot.venueCode ?? original.room?.CGBM,
+              XQDM: slot.campusCode ?? original.room?.XQDM }, reviewedAt: checkedAt });
+        }
+      }
       if (original) {
         state.reviewedRequests[requestId] = { ...original, checkedAt,
           review: typeof resolvedRequests[index] === 'object' ? resolvedRequests[index] : { requestId } };

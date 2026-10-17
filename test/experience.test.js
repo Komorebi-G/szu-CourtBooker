@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { friendlyDate, planExperience, repeatPlan, visiblePlans, selectionSummary, matchingMobileRun, pendingExecutionRequests } from '../shared/experience.js';
+import { friendlyDate, planExperience, repeatPlan, visiblePlans, selectionSummary, matchingMobileRun, pendingExecutionRequests, bookingTitle } from '../shared/experience.js';
 const before = Date.parse('2026-10-01T12:00:00+08:00');
 const after = Date.parse('2026-10-01T13:00:00+08:00');
 const plan = { id: 'p', revision: 'old', name: '晚间排球', accountId: 'a', project: 'volleyball', date: '2026-10-02', times: ['19:00-20:00', '20:00-21:00'], courts: ['B', 'A'], courtLabels: { A: '一号场', B: '二号场' }, bookingGoal: 'consecutive', preferSameCourt: true, intervalMs: 100, durationMs: 120000 };
@@ -40,6 +40,15 @@ test('失败的只读检查仍可启动预约，不要求核对不存在的订�
   const ex = state(plan, { run: { mode: 'check', status: 'error' } });
   assert.equal(ex.phase, 'ready'); assert.equal(ex.action, '开始倒计时');
 });
+test('没有成功或未知请求的预约失败可直接重试，不被核对与重试入口困住', () => {
+  for (const status of ['error', 'no_result', 'missed', 'interrupted']) {
+    const ex = state(plan, { now: after, run: { mode: 'now', status, successes: [], pendingRequests: {} } });
+    assert.equal(ex.phase, 'ready', status);
+    assert.equal(ex.action, '立即尝试', status);
+    assert.equal(ex.canStart, true, status);
+  }
+  assert.equal(state(plan, { run: { status: 'error', successes: [{ time: plan.times[0] }] } }).phase, 'attention');
+});
 test('成功一段后手动停止，以及学校名额已满，都显示核对入口', () => {
   assert.equal(state(plan, { run: { status: 'stopped', successes: [{ time: plan.times[0] }] } }).phase, 'attention');
   assert.equal(state(plan, { run: { status: 'limited', successes: [] } }).action, '核对与重试');
@@ -62,6 +71,15 @@ test('复用方案清除旧执行身份与相邻场地锚点，深复制偏好�
 test('复用仍在选择窗口内的未来日期，超出窗口则改为明天', () => {
   assert.equal(repeatPlan({ ...plan, date: '2026-10-07' }, before).date, '2026-10-07');
   assert.equal(repeatPlan({ ...plan, date: '2027-01-01' }, before).date, '2026-10-02');
+});
+
+test('两端默认名称不重复运动标签，复用自动名称不保留旧日期', () => {
+  const p = { ...plan, projectLabel: '排球', name: '排球预约' };
+  assert.equal(bookingTitle(p, '排球'), '排球');
+  const old = { ...p, date: '2026-09-20', name: '2026-09-20 排球 19:00-20:00' };
+  assert.equal(bookingTitle(old, '排球'), '排球');
+  assert.equal(repeatPlan(old, before).name, '');
+  assert.equal(repeatPlan({ ...old, name: '我的晚间排球' }, before).name, '我的晚间排球');
 });
 test('表单汇总即时区分未选时间、未选场地和连续目标不可达', () => {
   assert.equal(selectionSummary([], ['*']).valid, false);

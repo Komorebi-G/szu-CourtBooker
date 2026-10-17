@@ -7,11 +7,12 @@ import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { shanghaiDate } from '../shared/utils.js';
+import { shanghaiDate, addDays } from '../shared/utils.js';
 
 test('真实管理服务：慢预检可取消且不创建执行；只读核对生成剩余建议并保留未知记录', { timeout: 12000 }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'court-web-preflight-'));
-  const mock = join(dir, 'mock-school.mjs'), date = shanghaiDate();
+  const mock = join(dir, 'mock-school.mjs'), today = shanghaiDate();
+  const date = Date.now() >= Date.parse(`${today}T12:30:00+08:00`) ? addDays(today, 1) : today;
   await writeFile(mock, `
 let first = true;
 globalThis.fetch = async (url, options) => {

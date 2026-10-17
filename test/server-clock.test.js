@@ -204,3 +204,19 @@ test('API 截止/取消后不派发任何校时请求', async () => {
   await assert.rejects(api.sampleServerClock({ signal: controller.signal }), { name: 'AbortError' });
   assert.equal(calls, 0);
 });
+
+test('复用刚完成的身份和项目响应校时，足够可靠时不新增网络请求', async () => {
+  const result = await estimateServerClock({ sampleServerClock() { assert.fail('已有两个有效样本，无需额外校时请求'); } }, {
+    initialSamples: [sample(1000, 1100, 1000), sample(1300, 1400, 1000)], now: () => 1500,
+  });
+  assert.equal(result.reliable, true); assert.equal(result.reusedSamples, 2); assert.equal(result.uncertaintyMs, 800);
+});
+
+test('过期或带缓存 Age 的响应不能充当本次校时样本', async () => {
+  let calls = 0, now = 10000;
+  const result = await estimateServerClock({ async sampleServerClock() { calls++; return sample(now, now + 10, 10000); } }, {
+    initialSamples: [sample(1000, 1100, 1000), sample(1300, 1400, 1000, { age: '1' })],
+    now: () => now, pause: async (ms) => { now += ms; }, maxSamples: 2,
+  });
+  assert.equal(calls, 2); assert.equal(result.reusedSamples, undefined);
+});

@@ -33,19 +33,22 @@ export function planExperience(plan, { now = Date.now(), account, run } = {}) {
   const reviewed = run?.reviewedOutcome === 'success';
   const failed = !reviewed && run?.mode !== 'check' && (['error', 'partial', 'interrupted', 'no_result', 'missed', 'corrupt', 'limited'].includes(run?.status)
     || (run?.status === 'stopped' && run?.successes?.length > 0));
+  const needsReview = failed && (run?.successes?.length > 0 || ['partial', 'corrupt', 'limited'].includes(run?.status));
   const completed = (run?.status === 'success' || reviewed) && run?.mode !== 'check';
   let phase, hint, action;
-  if (active) { phase = 'active'; hint = run.status === 'waiting' ? '正在倒计时，保持设备在线' : '执行正在进行，可查看进度或停止'; action = '查看进度'; }
+  if (active) { phase = 'active'; hint = run.status === 'waiting' ? '正在倒计时，保持设备在线'
+    : run.activity === 'cooldown' ? `学校限制请求，等待重试${run.retryAt > now ? `（约 ${Math.ceil((run.retryAt - now) / 1000)} 秒）` : ''}`
+      : run.activityMessage || '执行正在进行，可查看进度或停止'; action = '查看进度'; }
   else if (pending) { phase = 'attention'; hint = '有结果待确认，先核对学校订单'; action = '核对与重试'; }
   else if (expired) { phase = 'expired'; hint = '候选时段已开始，可复用到新日期'; action = '再约一次'; }
   else if (completed) { phase = 'done'; hint = '预约已完成，请到学校核对 / 付款'; action = '查看结果'; }
-  else if (!account || account.exists === false) { phase = 'login'; hint = '先为这个方案连接学校账号'; action = '连接账号'; }
+  else if (!account || account.exists === false) { phase = 'login'; hint = '预约账号不可用，请先登录或更换账号'; action = '更新登录'; }
   else if (releaseAt > now && todayInShanghai(releaseAt) > todayInShanghai(now)) {
-    phase = 'future'; hint = `${friendlyDate(todayInShanghai(releaseAt), now)} 12:30 放号，当天可启动`; action = '放号当天可启动';
+    phase = 'future'; hint = `${friendlyDate(todayInShanghai(releaseAt), now)} 12:30 放号`; action = '放号当天可启动';
   } else {
-    phase = failed ? 'attention' : 'ready';
-    hint = failed ? '上次未完成，核对后可生成剩余方案' : releaseAt > now ? '今天 12:30 放号，现在可开始倒计时' : '已放号，现在可尝试预约';
-    action = failed ? '核对与重试' : releaseAt > now ? '开始倒计时' : '立即尝试';
+    phase = needsReview ? 'attention' : 'ready';
+    hint = needsReview ? '查询学校订单，排除已约时段后生成剩余预约' : failed ? '上次未约到，可重新尝试；开始前会自动核对学校订单' : releaseAt > now ? '今天 12:30 放号' : '已放号';
+    action = needsReview ? '核对与重试' : releaseAt > now ? '开始倒计时' : '立即尝试';
   }
   return { phase, hint, action, releaseAt, expired, active, pending,
     canStart: !active && !pending && !expired && !completed && Boolean(account && account.exists !== false)
@@ -70,7 +73,7 @@ export function repeatPlan(plan, now = Date.now()) {
   for (const key of ['id', 'revision', 'sameCourtAnchor', 'startAt', 'createdAt', 'updatedAt']) delete copy[key];
   const tomorrow = shiftDate(todayInShanghai(now), 1);
   copy.date = plan.date >= tomorrow && plan.date <= shiftDate(tomorrow, 6) ? plan.date : tomorrow;
-  copy.name = plan.name ?? '';
+  copy.name = plan.projectLabel && bookingTitle(plan, plan.projectLabel) === plan.projectLabel ? '' : plan.name ?? '';
   return copy;
 }
 
@@ -82,9 +85,20 @@ export function selectionSummary(times, courts, goal = 'two') {
   const goalValid = goal === 'two' ? distinctEnough && nonoverlappingPair
     : goal !== 'consecutive' || times.some((a) => times.some((b) => a !== b && (a.split('-')[1] === b.split('-')[0] || b.split('-')[1] === a.split('-')[0])));
   return { valid: times.length > 0 && courts.length > 0 && goalValid,
-    text: !times.length ? '先选择想运动的时段' : !courts.length ? `已选 ${times.length} 个候选时段，还需选择场地`
+    text: !times.length ? '尚未选择时段' : !courts.length ? `已选 ${times.length} 个候选时段 · 尚未选择场地`
       : !goalValid ? goal === 'two' ? !distinctEnough ? '任意两段需要至少选择两个候选时段' : '任意两段需要至少一组互不重叠的候选时段' : '连续两段需要选择首尾相接的时段'
         : `${goals[goal]} · ${times.length} 个候选时段 · ${courts.includes('*') ? '全部场地' : courts.length + ' 个优先场地'}` };
+}
+
+// Ordinary bookings use the selected slots directly; choosing a single slot
+// should never require changing an unrelated goal control.
+export function selectedBookingGoal(times) {
+  return new Set(times).size <= 1 ? 'one' : 'two';
+}
+
+export function bookingTitle(plan, projectLabel) {
+  const name = plan.name?.trim();
+  return !name || name === `${projectLabel}预约` || name === `${plan.date} ${projectLabel} ${plan.times?.[0]}` ? projectLabel : name;
 }
 
 // A changed mobile plan must never display a previous revision as its current result.
@@ -103,6 +117,7 @@ export function matchingMobileRun(plan, runs) {
   const pendingRequests = requests.filter((request) => request.planId === plan.id
     || (!request.planId && request.plan === plan.name));
   return { ...run, status: item?.status ?? run.status, reviewedOutcome: item?.reviewedOutcome,
+    activity: item?.activity, activityMessage: item?.activityMessage, retryAt: item?.retryAt,
     pendingRequests: Object.fromEntries(pendingRequests.map((request, i) => [request.requestId ?? String(i), request])),
     inFlight: pendingRequests[0] ?? null,
     successes: (run.successes ?? []).filter((s) => s.planId === plan.id || (!s.planId && s.plan === plan.name)) };

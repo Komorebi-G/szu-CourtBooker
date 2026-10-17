@@ -112,8 +112,9 @@ test('同作用域并行核对共享一次重试过程，取消期间不发下�
   const quota = new BookingQuota(); let reads = 0;
   const load = async () => { if (++reads === 1) throw new HttpResponseError(503, '/orders'); return 'ok'; };
   const first = quota.prepare('scope', load, { retryDelayMs: 1 });
-  assert.equal(quota.prepare('scope', load), first);
-  assert.equal(await first, 'ok'); assert.equal(reads, 2); assert.equal(quota.error('scope'), undefined);
+  const second = quota.prepare('scope', load);
+  assert.deepEqual(await Promise.all([first, second]), ['ok', 'ok']);
+  assert.equal(reads, 2); assert.equal(quota.error('scope'), undefined);
   const controller = new AbortController(); let cancelledReads = 0;
   const cancelled = quota.prepare('cancelled', async () => { cancelledReads++; throw new HttpResponseError(503, '/orders'); },
     { signal: controller.signal, onRetry: () => controller.abort() });
@@ -239,6 +240,45 @@ test('分页部分重叠也不能当作完整学校订单，仅比较整页不�
     return { data: { code: '0', datas: { myBookingInfo: { totalSize: 4, rows: form.pageNumber === 1 ? [a, b] : [b, c] } } } };
   } });
   await assert.rejects(api.getAllBookings(), /重复返回预约记录/);
+});
+
+test('大页学校订单完整读取：支持大页时一次读完，学校限页时按实际大小续读', async () => {
+  for (const cap of [500, 100]) {
+    const all = Array.from({ length: 331 }, (_, id) => ({ WID: String(id) }));
+    const requests = [];
+    const api = new SzuVenueApi({ async post(_path, form) {
+      requests.push(form); const size = Math.min(form.pageSize, cap);
+      return { data: { code: '0', datas: { myBookingInfo: { totalSize: all.length,
+        rows: all.slice((form.pageNumber - 1) * size, form.pageNumber * size) } } } };
+    } });
+    assert.deepEqual(await api.getAllBookings({ pageSize: 500 }), all);
+    assert.equal(requests.length, cap === 500 ? 1 : 4);
+    if (cap === 100) assert.deepEqual(requests.map(r => r.pageSize), [500, 100, 100, 100]);
+  }
+});
+
+test('立即预约仅复用五秒内且 Cookie 未变的身份，过期或 Cookie 改变必须重验', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-14T13:00:00+08:00') });
+  let reads = 0;
+  const client = { cookieRevision: 0, async get() { reads++; return { data: "USERID='A';USER_INFO={\"userName\":\"测试\"};APP_TITLE=" }; } };
+  const api = new SzuVenueApi(client);
+  await api.getIdentity(); await api.getIdentity({ refresh: true, maxAgeMs: 5000 }); assert.equal(reads, 1);
+  t.mock.timers.setTime(Date.now() + 5001);
+  await api.getIdentity({ refresh: true, maxAgeMs: 5000 }); assert.equal(reads, 2);
+  client.cookieRevision++;
+  await api.getIdentity({ refresh: true, maxAgeMs: 5000 }); assert.equal(reads, 3);
+  await api.getIdentity({ refresh: true }); assert.equal(reads, 4, '倒计时的强制复验仍然读取学校');
+});
+
+test('学校正常轮换应用 Cookie 不重复读身份，统一认证票据改变则必须复验', async () => {
+  let reads = 0;
+  const client = { cookieRevision: 0, session: { cookies: [{ name: 'MOD_AUTH_CAS', value: 'same-user', domain: 'ehall.szu.edu.cn', path: '/' }] },
+    async get() { reads++; return { data: "USERID='A';USER_INFO={\"userName\":\"测试\"};APP_TITLE=" }; } };
+  const api = new SzuVenueApi(client); await api.getIdentity();
+  client.cookieRevision++;
+  await api.getIdentity({ refresh: true, maxAgeMs: 5000 }); assert.equal(reads, 1);
+  client.session.cookies[0].value = 'another-ticket';
+  await api.getIdentity({ refresh: true, maxAgeMs: 5000 }); assert.equal(reads, 2);
 });
 
 test('最后 Cookie 保存失败仍返回学校已知成功与统计，不降成未知或丢掉停止标记', async () => {

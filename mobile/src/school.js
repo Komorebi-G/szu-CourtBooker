@@ -6,20 +6,27 @@ import { shanghaiDate } from '../../shared/utils.js';
 import { readReferenceCatalog, mergeReferenceCatalogs, referenceDates } from '../../shared/catalog.js';
 import { nativeTransport } from './device.js';
 
-export function createConnection(store, device, account, token = null) {
-  const client = new CoreHttpClient(account.session, { transport: nativeTransport(device, token, account.id),
+export function createConnection(store, device, account, token = null, options = {}) {
+  const transport = nativeTransport(device, token, account.id, options);
+  // The first identity read also belongs to this account's existing cooldown.
+  // This binding schedules requests; getIdentity still verifies the login.
+  if (account.userId) transport.bindIdentity(account.userId);
+  const client = new CoreHttpClient(account.session, { transport,
     save: async () => { account.session = client.session; await store.save(); } });
   return { client, api: new SzuVenueApi(client) };
 }
 export async function verifyAccount(store, device, account) {
   const { api, client } = createConnection(store, device, account);
+  let identity;
   try {
-    const identity = await api.getIdentity();
+    identity = await api.getIdentity();
     if (account.userId && identity.id !== account.userId) throw new Error('登录身份改变，请恢复原账号，或新增一个用户');
     if (store.state.accounts.some((a) => a.id !== account.id && a.userId === identity.id)) throw new Error('此学校账号已绑定其他用户，请使用原用户');
-    account.userId = identity.id; account.user = identity.name; account.verifiedAt = new Date().toISOString();
-    await store.save(); return identity;
+    await api.getAvailableDates();
   } finally { await client.flush(); }
+  const verified = { ...account, userId: identity.id, user: identity.name, verifiedAt: new Date().toISOString() };
+  await store.update({ accounts: store.state.accounts.map((saved) => saved.id === account.id ? verified : saved) });
+  return identity;
 }
 export async function readCatalog(store, device, account, projectId, targetDate = shanghaiDate(), { signal } = {}) {
   const { api, client } = createConnection(store, device, account);
@@ -39,7 +46,8 @@ export async function readCatalog(store, device, account, projectId, targetDate 
       cached: reference.cached || merged.cached, partial: reference.partial,
       rooms: merged.rooms.map((room) => Object.fromEntries(['WID', 'CDMC', 'CGBM', 'CQBM', 'XMDM', 'XQDM']
         .filter((field) => room[field] !== undefined).map((field) => [field, room[field]]))) };
-    signal?.throwIfAborted(); store.state.catalogs[key] = catalog; await store.save();
+    signal?.throwIfAborted();
+    await store.update({ catalogs: { ...store.state.catalogs, [key]: catalog } });
     return catalog;
   } finally { await client.flush(); }
 }

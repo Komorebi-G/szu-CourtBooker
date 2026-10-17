@@ -1,6 +1,6 @@
 {
   "name": "szu-court-booker",
-  "version": "0.3.0",
+  "version": "1.5.8",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -15,7 +15,7 @@
     "session:check": "node src/cli.js session check",
     "catalog": "node src/cli.js catalog",
     "run:dry": "node src/cli.js run --now",
-    "check": "node --test",
+    "check": "node --test --test-concurrency=2",
     "build:windows": "node scripts/build-windows.js",
     "build:android": "npm run apk --prefix mobile",
     "release:prepare": "node scripts/prepare-release.js"
@@ -28,6 +28,7 @@
     "yaml": "^2.8.1"
   },
   "devDependencies": {
-    "postject": "^1.0.0-alpha.6"
+    "postject": "^1.0.0-alpha.6",
+    "resedit": "3.1.0"
   }
 }

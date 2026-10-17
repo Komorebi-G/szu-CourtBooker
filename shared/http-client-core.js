@@ -2,6 +2,10 @@ import { BASE_URL } from './constants.js';
 import { SessionExpiredError, RequestNotSentError, HttpResponseError } from './errors.js';
 import { combineAbortSignals, timedAbortSignal } from './abort-signal.js';
 export { SessionExpiredError } from './errors.js';
+const readOnlyPostPaths = new Set(['sportVenue/getSportVenueData.do', 'sportVenue/getRqList.do', 'sportVenue/getTimeList.do',
+  'modules/sportVenue/getOpeningRoom.do', 'modules/myBooking/myBookingInfo.do']);
+export const isReadOnlySchoolRequest = (path, method) => path === 'index.do' && method === 'GET'
+  || method === 'POST' && readOnlyPostPaths.has(path);
 
 function parseSetCookie(header) {
   const [pair, ...attributes] = header.split(';');
@@ -40,6 +44,9 @@ export class CoreHttpClient {
     this.flushPending = Promise.resolve();
   }
 
+  bindIdentity(id) { this.transport.bindIdentity?.(id); }
+  getRequestGate() { return this.transport.getRequestGate?.() ?? this.requestGate; }
+
   cookieHeader(url) {
     const parsed = new URL(url);
     const now = Date.now() / 1000;
@@ -74,7 +81,7 @@ export class CoreHttpClient {
     }
   }
 
-  async request(path, { method = 'GET', form, expect = 'json', timeoutMs, deadlineMs, signal, onDispatch, beforeDispatch, abortInFlight = false, requestId, requestMetadata } = {}) {
+  async request(path, { method = 'GET', form, expect = 'json', timeoutMs, deadlineMs, signal, onDispatch, beforeDispatch, abortInFlight = false, requestId, requestMetadata, intervalMs = 0, onWait } = {}) {
     // Check again at actual dispatch: a desktop request may have waited for
     // another request to finish updating this account's cookies. In-flight
     // responses still use only the timeout signal so Stop cannot hide success.
@@ -97,7 +104,11 @@ export class CoreHttpClient {
       );
     }
 
-    beforeDispatch?.();
+    const mutation = /\/(?:insertVenueBookingInfo|cancelSelectBookingInfo)\.do$/.test(url.pathname);
+    // The configured interval spaces mutations. A just-finished read must not
+    // postpone the first POST or restart the interval after a slow first POST.
+    if (!this.transport.handlesDispatch) await this.requestGate?.wait({ signal, deadline: deadlineMs, intervalMs, reserve: mutation, onWait });
+    if (!this.transport.handlesDispatch) beforeDispatch?.();
     const startedAt = Date.now();
     if (Number.isFinite(deadlineMs) && startedAt >= deadlineMs) {
       throw new RequestNotSentError('执行窗口已结束，未发送请求');
@@ -106,10 +117,16 @@ export class CoreHttpClient {
     // A sent booking still waits for its response when Stop is pressed.
     const requestTimeoutMs = Math.max(1, Math.ceil(abortInFlight && Number.isFinite(deadlineMs)
       ? Math.min(timeoutMs ?? this.timeoutMs, deadlineMs - startedAt) : timeoutMs ?? this.timeoutMs));
-    const timeout = timedAbortSignal(requestTimeoutMs);
-    const combined = combineAbortSignals(abortInFlight ? [timeout.signal, signal] : [timeout.signal]);
-    onDispatch?.({ startedAt });
-    let response, text, endedAt;
+    const timeoutController = new AbortController();
+    let timeout;
+    const dispatched = (details) => {
+      timeout = timedAbortSignal(requestTimeoutMs);
+      timeout.signal.addEventListener('abort', () => timeoutController.abort(timeout.signal.reason), { once: true });
+      onDispatch?.(details);
+    };
+    const combined = combineAbortSignals(abortInFlight ? [timeoutController.signal, signal] : [timeoutController.signal]);
+    if (!this.transport.handlesDispatch) dispatched({ startedAt });
+    let response, text, endedAt, headersEndedAt;
     try { response = await this.transport(url, {
       method,
       headers,
@@ -120,31 +137,56 @@ export class CoreHttpClient {
       abortInFlight,
       requestId,
       requestMetadata,
+      onDispatch: dispatched,
+      intervalMs, onWait,
+      dispatchSignal: signal,
       beforeDispatch: () => {
         if (signal?.aborted) throw new RequestNotSentError('本次执行已停止，未发送请求');
         headers.cookie = this.cookieHeader(url); beforeDispatch?.();
       },
       signal: combined.signal,
     });
-      endedAt = Date.now();
+      headersEndedAt = Date.now();
       this.updateCookies(response);
       text = await response.text();
-    } finally { combined.dispose(); timeout.dispose(); }
+      endedAt = Date.now();
+    } finally { combined.dispose(); timeout?.dispose(); }
     const contentType = response.headers.get('content-type') ?? '';
+    let parsed;
+    try { parsed = JSON.parse(text); } catch { /* Identity pages are HTML. */ }
+    if (response.status === 429) parsed = { code: 'HTTP_429',
+      msg: typeof parsed?.msg === 'string' && parsed.msg.trim() ? parsed.msg : '学校限制请求频率（HTTP 429）',
+      ...(typeof parsed?.code === 'string' ? { schoolCode: parsed.code } : {}) };
+    const gate = this.getRequestGate();
+    const cooldownMs = this.transport.handlesDispatch ? response.cooldownMs ?? 0
+      : gate?.observe(parsed, { status: response.status, retryAfter: response.headers.get('retry-after'), mutation }) ?? 0;
 
     if (response.status === 301 || response.status === 302 || response.status === 401) {
       throw new SessionExpiredError('登录态已失效，请重新登录并导入 Cookie');
     }
     // An HTML gateway outage is a network failure, not evidence of an expired login.
-    if (!response.ok && response.status !== 403) throw new HttpResponseError(response.status, url.pathname);
-    if (response.status === 403 || (expect === 'json' && contentType.includes('text/html'))) {
+    if (!response.ok && response.status !== 403 && !(response.status === 429 && expect === 'json')) throw new HttpResponseError(response.status, url.pathname);
+    if (response.status === 403 || (expect === 'json' && response.status !== 429 && contentType.includes('text/html'))) {
       throw new SessionExpiredError('请求被拒绝，登录态可能已失效，请重新导入 Cookie');
     }
 
+    if (response.status !== 429 && isReadOnlySchoolRequest(path, method) && typeof parsed?.code === 'string' && parsed.code !== '0'
+      && typeof parsed.msg === 'string' && /登录|身份认证/.test(parsed.msg)) {
+      throw new SessionExpiredError(parsed.msg);
+    }
+
     let data = text;
+    if (typeof parsed?.loginURL === 'string') {
+      let login;
+      try { login = new URL(parsed.loginURL, BASE_URL); } catch { /* Unrecognized redirects remain format errors. */ }
+      if (login?.protocol === 'https:' && login.hostname === 'authserver.szu.edu.cn'
+        && (!login.port || login.port === '443') && login.pathname === '/authserver/login') {
+        throw new SessionExpiredError('学校要求重新登录，请更新学校账号');
+      }
+    }
     if (expect === 'json') {
       try {
-        data = JSON.parse(text);
+        data = parsed ?? JSON.parse(text);
       } catch {
         throw new Error(`接口没有返回 JSON：${url.pathname}`);
       }
@@ -154,8 +196,12 @@ export class CoreHttpClient {
       status: response.status,
       date: response.headers.get('date'),
       age: response.headers.get('age'),
-      startedAt,
-      endedAt,
+      startedAt: response.startedAt ?? startedAt,
+      endedAt: response.endedAt ?? endedAt,
+      queueMs: response.queueMs ?? 0,
+      headersEndedAt,
+      cooldownMs, retryAt: gate?.cooldownUntil, policyObserved: Boolean(gate),
+      ...(response.nativeTiming ? { nativeTiming: response.nativeTiming } : {}),
     };
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "szu-court-booker-mobile",
-  "version": "0.3.0",
+  "version": "1.5.8",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -16,5 +16,10 @@
   "devDependencies": {
     "@capacitor/cli": "8.5.2",
     "esbuild": "0.28.2"
+  },
+  "overrides": {
+    "xcode": {
+      "uuid": "11.1.1"
+    }
   }
 }

@@ -148,6 +148,12 @@ test('桌面重开后保留结构、按账号隔离；缓存不包含满员等�
   assert.deepEqual(cached.courts.map((c) => c.id), ['A']); assert.equal(cached.cached, true);
   assert.equal(cached.rooms[0].disabled, undefined); assert.equal(cached.rooms[0].text, undefined);
   assert.deepEqual((await store.read({ ...input, api, accountId: 'b' })).courts, []);
+  const structure = await store.cachedRooms(input);
+  assert.deepEqual(structure, [room('A')]);
+  assert.deepEqual(await store.cachedRooms({ ...input, accountId: 'b' }), []);
+  for (const changes of [{ sportCode: '002' }, { modeCode: '2.0' }, { campusCode: '2' }, { venues: [{ CGBM: 'w' }] }]) {
+    assert.deepEqual(await store.cachedRooms({ ...input, target: { ...target, ...changes } }), []);
+  }
 });
 
 test('不同日期同时刷新同一参考目录，不互相覆盖读到的新场地', async (t) => {

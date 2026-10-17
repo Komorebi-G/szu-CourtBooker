@@ -171,6 +171,7 @@ test('后段先约到C，下一轮补前段也先C；关闭同场则从A开始',
     };
     // Serial lanes here make the release of the earlier slot deterministic.
     f.args.config.booking.taskConcurrency = 1;
+    f.args.config.scheduler.timeoutMs = 3000;
     const result = await runBooking(f.args);
     assert.equal(result.successes.length, 2);
     assert.equal(result.successes.find((s) => s.task.time.startsWith('19:')).task.room.WID, preferSameCourt ? 'C' : 'A');
@@ -200,6 +201,7 @@ test('不同场馆的目录局部未开放，不影响同一时段另一场馆',
 
 test('前段目录503后下一轮恢复，后段先成功，最终补齐两段', async () => {
   const f = fixture({ preferSameCourt: true, times: ['19:00-20:00', '20:00-21:00'] });
+  f.args.config.scheduler.timeoutMs = 3000;
   let queries = 0;
   f.api.getOpeningRooms = async ({ time }) => {
     if (time.startsWith('19:') && ++queries === 1) throw new HttpResponseError(503, '/catalog');

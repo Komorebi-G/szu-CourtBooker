@@ -1,6 +1,6 @@
 {
   "appId": "cn.szucourt.booker",
-  "appName": "场馆预约助手",
+  "appName": "深大场馆预约",
   "webDir": "www",
   "android": { "allowMixedContent": false, "minWebViewVersion": 109 },
   "server": { "androidScheme": "https", "errorPath": "unsupported-webview.html" }

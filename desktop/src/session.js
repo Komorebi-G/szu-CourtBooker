@@ -1,30 +1,16 @@
-import { chmod, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { chromium } from 'playwright-core';
 import { APP_URL, BASE_URL, DEFAULT_SESSION_FILE } from '../../shared/constants.js';
 import { browserCdpPort } from '../../shared/browser-port.js';
 import { parseSessionText } from '../../shared/session-format.js';
 import { RequestNotSentError } from '../../shared/errors.js';
+import { atomicWrite } from './atomic-file.js';
 
 const saveQueues = new Map();
 
 async function writeSession(session, absolute) {
-  const temporary = `${absolute}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, `${JSON.stringify(session, null, 2)}\n`, { mode: 0o600 });
-    await chmod(temporary, 0o600);
-    try {
-      await rename(temporary, absolute);
-    } catch (error) {
-      if (!['EEXIST', 'EPERM'].includes(error.code)) throw error;
-      await rm(absolute, { force: true });
-      await rename(temporary, absolute);
-    }
-    await chmod(absolute, 0o600);
-  } finally {
-    await rm(temporary, { force: true });
-  }
+  await atomicWrite(absolute, `${JSON.stringify(session, null, 2)}\n`);
 }
 
 function sessionTransaction(path, operation, { priority = 'normal', signal, cancellable = false } = {}) {

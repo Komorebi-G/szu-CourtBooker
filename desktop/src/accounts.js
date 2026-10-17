@@ -13,7 +13,8 @@ export class AccountStore {
     this.bindingQueue = Promise.resolve();
     this.revisions = new Map();
     this.verifyIdentity = verifyIdentity ?? (async (session, path, options = {}) => {
-      const client = path ? await HttpClient.create({ sessionPath: path, priority: options.priority ?? 'background' }) : new HttpClient(session);
+      const clientOptions = { priority: options.priority ?? 'background', expectedUserId: options.expectedUserId };
+      const client = path ? await HttpClient.create({ ...clientOptions, sessionPath: path }) : new HttpClient(session, clientOptions);
       const api = new SzuVenueApi(client);
       const identity = await api.getIdentity(options);
       await api.getAvailableDates(options);
@@ -71,7 +72,7 @@ export class AccountStore {
     const metadata = await this.metadata(id);
     const session = parseSessionText(text);
     if (metadata.userId) {
-      const identity = await this.verifyIdentity(session);
+      const identity = await this.verifyIdentity(session, undefined, { expectedUserId: metadata.userId });
       if (identity.id !== metadata.userId) throw new Error('导入的学校账号与此用户不一致，请新增账号后导入');
       await this.assertUnique(id, identity.id);
     }
@@ -92,7 +93,7 @@ export class AccountStore {
   }
   async inspectLogin(id, stagingPath) {
     const metadata = await this.metadata(id);
-    const identity = await this.verifyIdentity(await loadSession(stagingPath), stagingPath);
+    const identity = await this.verifyIdentity(await loadSession(stagingPath), stagingPath, { expectedUserId: metadata.userId });
     if (metadata.userId && metadata.userId !== identity.id) throw new Error('登录身份与此用户不一致，原登录未改动');
     await this.assertUnique(id, identity.id);
     return identity;
@@ -121,7 +122,7 @@ export class AccountStore {
     const metadata = await this.metadata(id), path = this.sessionPath(id);
     let identity, renewedSession;
     try {
-      try { identity = await this.verifyIdentity(await loadSession(path), path, options); }
+      try { identity = await this.verifyIdentity(await loadSession(path), path, { ...options, expectedUserId: metadata.userId }); }
       catch (error) {
         if (!(error instanceof SessionExpiredError) || !this.renewSession) throw error;
         if (!metadata.userId) throw new SessionExpiredError('尚未绑定学校身份，请点击浏览器登录并确认用户');

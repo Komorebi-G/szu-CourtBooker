@@ -78,10 +78,10 @@ test('新建方案可留空名称，保存时生成可识别的默认名称', ()
 test('手机多账号前台执行：各账号同时发单、成功落盘、结束释放亮屏', async () => {
   const f = fixture(); let inFlight = 0, max = 0;
   f.runner.createApi = async (...args) => { const c = await f.createApi(...args); const original = c.api.book;
-    c.api.book = async (input) => { max = Math.max(max, ++inFlight); await new Promise((r) => setTimeout(r, 5));
+    c.api.book = async (input) => { max = Math.max(max, ++inFlight); await new Promise((r) => setTimeout(r, 300));
       const response = await original(input); inFlight--; return response; }; return c; };
   const result = await f.runner.start([f.plan, { ...f.plan, id: 'p2', accountId: 'b' }], 'now');
-  assert.equal(result.status, 'success', JSON.stringify(result)); assert.equal(result.successes.length, 4); assert.equal(max, 2);
+  assert.equal(result.status, 'success', JSON.stringify(result)); assert.equal(result.successes.length, 4); assert.equal(max, 2, '两账号可各自执行，同账号只保留一个提交');
   assert.equal(f.saved().runs[0].successes.length, 4); assert.equal(f.saved().runs[0].inFlight, undefined);
   assert.deepEqual(f.saved().runs[0].pendingRequests, {});
   assert.deepEqual(f.armed, [true, false]); assert.ok(f.calls.some(([id]) => id === 'b'));
@@ -104,7 +104,7 @@ test('账号 A 的预约响应未返回时，账号 B 仍完成两个时段', { 
   };
   const work = f.runner.start([f.plan, { ...f.plan, id: 'other', accountId: 'b' }], 'now');
   await waitingA; await bookedB;
-  assert.equal(f.calls.filter(([account]) => account === 'a').length, 0);
+  assert.deepEqual(f.calls.filter(([account]) => account === 'a'), [], '首段未返回时同账号后段也不发送');
   assert.equal(f.calls.filter(([account]) => account === 'b').length, 2);
   releaseA(); const run = await work;
   assert.equal(run.status, 'success');
@@ -116,13 +116,15 @@ function withVolleyball(c) {
   c.api.getOpeningRooms = async ({ sportCode, venueCode }) => [{ WID: 'court', CDMC: '1号场', CGBM: venueCode, XMDM: sportCode }];
   return c;
 }
-test('同一真实账号的不同体育项目也不能并行提交', async () => {
-  const f = fixture(); let active = 0, max = 0;
+test('同账号多时段与不同项目共用串行提交队列', async () => {
+  const f = fixture(); let active = 0, max = 0, activeSport;
   f.runner.createApi = async (account) => {
     const c = withVolleyball(await f.createApi(account)), book = c.api.book;
     c.api.book = async (input) => {
+      if (active) assert.equal(input.room.XMDM, activeSport, '不同项目不能混入正在提交的两段方案');
+      activeSport = input.room.XMDM;
       max = Math.max(max, ++active);
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       const response = await book(input); active--; return response;
     };
     return c;
@@ -565,6 +567,39 @@ test('学校未知订单与候选重叠时不提交，不能把未知当成空�
   const run = await f.runner.start([f.plan], 'now');
   assert.equal(run.status, 'error'); assert.match(run.items[0].error, /人工核对/); assert.equal(f.calls.length, 0);
 });
+test('14日羽毛球12-13、13-14：真实适配链路兼容学校取消/历史订单，两段均可提交并保存', async (t) => {
+  t.mock.timers.setTime(Date.parse('2026-10-13T20:00:00+08:00'));
+  const f = fixture(), submitted = [], queried = [];
+  const plan = { ...f.plan, date: '2026-10-14', times: ['12:00-13:00', '13:00-14:00'], bookingGoal: 'two' };
+  f.store.state.accounts[0].session = { userAgent: 'android-test', cookies: [] };
+  f.device.request = async ({ url, body }) => {
+    const path = new URL(url).pathname.split('/').at(-1), form = new URLSearchParams(body);
+    queried.push(path);
+    let result;
+    if (path === 'index.do') return { status: 200, headers: {}, body: "USERID='A';USER_INFO={\"userName\":\"测试同学\"};APP_TITLE=" };
+    if (path === 'getSportVenueData.do') result = metadata;
+    else if (path === 'myBookingInfo.do') result = { code: '0', datas: { myBookingInfo: { totalSize: 1, rows: [
+      { YYSJD: '2026-10-12 12:00~2026-10-12 13:00', XMDM: '001', XMDM_DISPLAY: '羽毛球', YYZT: 'CG_WC', YYZT_DISPLAY: '已完成' },
+    ] } } };
+    else if (path === 'getOpeningRoom.do') result = { code: '0', datas: { getOpeningRoom: { rows: [
+      { WID: 'court', CDMC: '1号场', CGBM: 'v', XMDM: '001', XQDM: '1' },
+    ] } } };
+    else if (path === 'insertVenueBookingInfo.do') {
+      submitted.push(Object.fromEntries(form));
+      result = { code: '0', data: { DHID: `test-order-${submitted.length}` } };
+    } else assert.fail(`不应调用 ${path}`);
+    return { status: 200, headers: {}, body: JSON.stringify(result) };
+  };
+  f.runner.createApi = (account, token) => createConnection(f.store, f.device, account, token);
+  const run = await f.runner.start([plan], 'now');
+  assert.equal(run.status, 'success', JSON.stringify(run));
+  assert.deepEqual(submitted.map((form) => [form.YYRQ, form.KYYSJD]), plan.times.map((time) => [plan.date, time]));
+  assert.equal(queried.filter((path) => path === 'myBookingInfo.do').length, 1);
+  assert.ok(queried.indexOf('myBookingInfo.do') < queried.indexOf('insertVenueBookingInfo.do'));
+  assert.deepEqual(f.saved().runs[0].successes.map((s) => s.time), plan.times);
+  assert.equal(pendingMobileRequests(f.saved().runs[0]).length, 0);
+  assert.deepEqual(f.armed, [true, false]);
+});
 test('账号业务拒绝先阻止同账号排队方案，其他账号继续', async () => {
   const f = fixture();
   f.runner.createApi = async (account) => { const c = await f.createApi(account), book = c.api.book;
@@ -752,6 +787,41 @@ test('学校查不到的请求必须经人工明确确认后才能归档为无�
   assert.equal(pendingMobileRequests(confirmed).length, 0);
   assert.equal(confirmed.reviewedRequests.unknown.reviewResult, 'absent');
   assert.equal(confirmed.reviewedRequests.unknown.manuallyConfirmed, true);
+  assert.equal(confirmed.reviewedOutcome, 'no_result', '人工确认无订单后，不再把未知结果当作当前状态');
+});
+
+test('未知请求从学校确认成功后补入成功记录；只确认一段仍可在原任务继续', () => {
+  const f = fixture(), plan = { ...f.plan, bookingGoal: 'two' };
+  const request = { requestId: 'matched', planId: plan.id, accountId: 'a', date: plan.date, time: plan.times[0], court: '1号场' };
+  const run = { id: 'old', finishedAt: 'old', status: 'error', error: '网络断开', plans: [plan], successes: [],
+    items: [{ id: plan.id, name: plan.name, status: 'error' }], pendingRequests: { matched: request } };
+  const review = { checkedAt: new Date().toISOString(), booked: [{ date: plan.date, time: plan.times[0], court: '1号场', matchesCourts: true }] };
+  const [result] = reviewedMobileRuns([run], plan, review);
+  assert.equal(pendingMobileRequests(result).length, 0); assert.equal(result.successes.length, 1);
+  assert.equal(result.successes[0].time, plan.times[0]); assert.equal(result.successes[0].planId, plan.id);
+  assert.equal(result.items[0].reviewedOutcome, 'partial'); assert.equal(result.reviewedOutcome, 'partial');
+  assert.equal(result.status, 'error'); assert.equal(run.successes.length, 0);
+  assert.equal(reviewedMobileRuns([result], plan, review)[0].successes.length, 1, '反复刷新不能重复计入成功');
+});
+
+test('人工确认未预约仅解除选中的请求，同账号其他未知请求继续保留', () => {
+  const f = fixture(), request = (requestId, time) => ({ requestId, planId: f.plan.id, accountId: 'a', date: f.plan.date, time, court: '1号场' });
+  const run = { id: 'old', status: 'error', finishedAt: 'old', plans: [f.plan], items: [],
+    pendingRequests: { first: request('first', f.plan.times[0]), second: request('second', f.plan.times[1]) } };
+  const [result] = reviewedMobileRuns([run], f.plan, { booked: [], checkedAt: new Date().toISOString() }, { confirmedAbsentIds: new Set(['first']) });
+  assert.deepEqual(pendingMobileRequests(result).map((request) => request.requestId), ['second']);
+});
+
+test('已核实请求遇到原生发送标记清理失败，重启不能再恢复成未知请求', async () => {
+  const f = fixture(); let saved;
+  const request = { requestId: 'matched', planId: f.plan.id, accountId: 'a', date: f.plan.date, time: f.plan.times[0] };
+  const data = { ...f.store.state, runs: [{ id: 'old', status: 'error', finishedAt: 'old', dispatchJournalVersion: 1,
+    plans: [f.plan], items: [], successes: [], reviewedRequests: { matched: { ...request, reviewResult: 'absent', manuallyConfirmed: true } } }] };
+  const store = new MobileStore({ async readState() { return { value: JSON.stringify(data), dispatchJournalAvailable: true,
+    dispatchedRequests: { matched: { ...request, runId: 'old', sentAt: Date.now() } } }; }, async writeState({ value }) { saved = JSON.parse(value); } });
+  await store.load();
+  assert.equal(pendingMobileRequests(store.state.runs[0]).length, 0);
+  assert.equal(Object.keys(saved.runs[0].pendingRequests ?? {}).length, 0, '下次原生保存应清理已经核实的发送标记');
 });
 
 test('历史归档缩小执行主状态，同时保留未知请求和当前方案最新结果', async () => {

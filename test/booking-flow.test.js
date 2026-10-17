@@ -54,12 +54,22 @@ test('时段不连续时不继承更早场地；时间按先后处理', async ()
   await runBooking(args);
   assert.deepEqual(attempts, [['19:00-20:00', 'A'], ['19:00-20:00', 'B'], ['21:00-22:00', 'A'], ['21:00-22:00', 'B']]);
 });
-test('未到设定时间绝不下单，即使保留旧 earlyStartMs', async () => {
+test('未到设定时间绝不下单，即使保留旧 earlyStartMs', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-10-14T13:00:00+08:00') });
   const { args, api } = fixture({ times: ['19:00-20:00'] });
-  const release = Date.now() + 260;
+  const release = Date.now() + 1000;
   args.immediate = false; args.releaseAtServer = release; args.config.scheduler.earlyStartMs = 5000;
-  api.book = async () => { assert.ok(Date.now() >= release); return { code: '0' }; };
-  assert.equal((await runBooking(args)).ok, true);
+  let sent = 0, settled = false;
+  api.book = async () => { assert.ok(Date.now() >= release); sent++; return { code: '0' }; };
+  const controller = new AbortController();
+  const work = runBooking({ ...args, signal: controller.signal }).finally(() => settled = true);
+  for (let elapsed = 0; elapsed < 2000 && !settled; elapsed += 10) {
+    await new Promise(resolve => setImmediate(resolve));
+    if (Date.now() < release) assert.equal(sent, 0);
+    t.mock.timers.tick(10);
+  }
+  if (!settled) controller.abort();
+  assert.equal((await work).ok, true); assert.equal(sent, 1);
 });
 test('等待中停止很快退出，零预约请求', async () => {
   const { args, attempts } = fixture(); const controller = new AbortController();
@@ -123,6 +133,7 @@ test('默认前一天12:30，闰月与跨月日期正确', () => {
 test('可选剩余场地：每轮先选定顺序，再学校顺序，重复目录不重复提交', async () => {
   const { args, api, attempts } = fixture({ courtNames: ['B', 'A'], includeOtherCourts: true, times: ['19:00-20:00'], preferSameCourt: false });
   api.getOpeningRooms = async () => ['D', 'A', 'B', 'C', 'D'].map((id) => ({ WID: id, CDMC: id, CGBM: 'v' }));
+  args.config.scheduler.timeoutMs = 2500;
   api.book = async ({ time, room }) => { attempts.push([time, room.WID]); return { code: attempts.length === 8 ? '0' : '1', msg: '已满' }; };
   const result = await runBooking(args);
   assert.equal(result.ok, true);
@@ -131,6 +142,7 @@ test('可选剩余场地：每轮先选定顺序，再学校顺序，重复目�
 test('关闭剩余场地：未选的场地始终不尝试，兼容旧方案', async () => {
   for (const includeOtherCourts of [undefined, false]) {
     const { args, api, attempts } = fixture({ courtNames: ['B', 'A'], includeOtherCourts, times: ['19:00-20:00'] });
+    args.config.scheduler.timeoutMs = 2500;
     api.book = async ({ time, room }) => { attempts.push([time, room.WID]); return { code: attempts.length === 4 ? '0' : '1', msg: '已满' }; };
     assert.equal((await runBooking(args)).ok, true);
     assert.deepEqual(attempts.map((a) => a[1]), ['B', 'A', 'B', 'A']);

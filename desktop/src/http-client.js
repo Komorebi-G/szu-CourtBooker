@@ -4,6 +4,7 @@ import { CoreHttpClient, isReadOnlySchoolRequest } from '../../shared/http-clien
 import { SessionExpiredError, RequestNotSentError } from '../../shared/errors.js';
 import { RequestGate } from '../../shared/request-gate.js';
 import { resolve } from 'node:path';
+import { Readable } from 'node:stream';
 export { SessionExpiredError } from '../../shared/errors.js';
 const gates = new Map();
 function gateFor(key) {
@@ -11,9 +12,21 @@ function gateFor(key) {
   return gates.get(key);
 }
 
+export function fetchWithOneShotMutation(url, options, transport = globalThis.fetch) {
+  const mutation = options.method === 'POST'
+    && /\/(?:insertVenueBookingInfo|cancelSelectBookingInfo)\.do$/.test(new URL(url).pathname);
+  if (!mutation) return transport(url, options);
+  // Fetch may transparently replay a buffered POST after HTTP 421, even with
+  // manual redirects. A one-shot body keeps the school's original response
+  // visible without changing fetch's connection pool or read-only requests.
+  const body = Buffer.from(options.body?.toString() ?? '');
+  return transport(url, { ...options, body: Readable.from([body]), duplex: 'half',
+    headers: { ...options.headers, 'content-length': String(body.length) } });
+}
+
 export class HttpClient extends CoreHttpClient {
   constructor(session, { sessionPath = DEFAULT_SESSION_FILE, timeoutMs = 5000, persistRequests = false,
-    renewSession, expectedUserId, transport, priority = 'normal' } = {}) {
+    renewSession, expectedUserId, transport = fetchWithOneShotMutation, priority = 'normal' } = {}) {
     super(session, { timeoutMs, transport, save: (value) => saveSession(value, sessionPath) });
     this.sessionPath = sessionPath;
     this.persistRequests = persistRequests;

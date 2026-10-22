@@ -2,7 +2,7 @@
 scheduler:
   releaseTime: '12:30:00'
   targetDate: tomorrow
-  pollIntervalMs: 100
+  pollIntervalMs: 80
   pollJitterMs: 0
   timeoutMs: 120000
   queryConcurrency: 2

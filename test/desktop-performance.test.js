@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rename, rm } from 'node:fs/promises';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -182,6 +184,41 @@ test('桌面慢诊断日志：持久预约意图和 POST 不等追加日志，�
   assert.ok(events.some((entry) => entry.details?.event === 'execution_summary'));
 });
 
+test('桌面开始提交时：状态快照合并进必要意图写入，不排在首单前等待磁盘', { timeout: 4000 }, async (t) => {
+  const submitted = deferred(), backgroundStarted = deferred(), backgroundResponse = deferred();
+  let dir;
+  const originalRename = rename;
+  const mockedRename = t.mock.method(fs, 'rename', async (source, destination) => {
+    if (dir && destination === join(dir, 'state.json')) {
+      const snapshot = await readJson(source);
+      if (snapshot.status === 'booking' && !Object.keys(snapshot.pendingRequests ?? {}).length
+        && !Object.keys(snapshot.completedRequests ?? {}).length) {
+        backgroundStarted.resolve(); await backgroundResponse.promise;
+      }
+    }
+    return originalRename(source, destination);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { backgroundResponse.resolve(); mockedRename.mock.restore(); syncBuiltinESMExports(); });
+  const f = await laboratory(t, { book: async () => {
+    const saved = await readJson(join(dir, 'state.json'));
+    assert.equal(Object.keys(saved.pendingRequests).length, 1, '必要预约意图仍在发送前保存');
+    const marker = await readJson(join(dir, 'dispatch.json'));
+    assert.ok(Object.values(marker.pendingRequests)[0].sentAt, '发送标记仍在调用传输前保存');
+    submitted.resolve();
+  } });
+  dir = await f.job('A');
+  const work = f.live.start(dir);
+  try {
+    const first = await Promise.race([submitted.promise.then(() => 'submitted'),
+      backgroundStarted.promise.then(() => 'background'), work.then(() => 'finished')]);
+    assert.equal(first, 'submitted', '仅更新状态的磁盘快照不应挡在首单前');
+  } finally { backgroundResponse.resolve(); await work; }
+  const saved = await readJson(join(dir, 'state.json'));
+  assert.equal(saved.status, 'success'); assert.equal(saved.successes.length, 1);
+  assert.deepEqual(saved.pendingRequests, {});
+});
+
 async function waitForPrepared(dir, releaseAt) {
   while (Date.now() < releaseAt) {
     const state = await readJson(join(dir, 'state.json'));
@@ -217,7 +254,10 @@ for (const changeCandidate of [false, true]) {
     if (changeCandidate) assert.ok(observed.sentAt, '变化的候选需要完成本次意图写入后才发单');
     else {
       assert.equal(observed.preparedAt, prepared.preparedAt);
-      assert.equal(observed.sentAt, undefined, '匹配首单无需到点再写一遍发送状态');
+      // A coalesced UI snapshot may finish while the compact dispatch marker
+      // is syncing. Reuse is established by the durable intent's identity,
+      // regardless of whether that background snapshot includes sentAt.
+      assert.equal(observed.attemptId, prepared.attemptId, '匹配首单应复用已落盘意图，不另建发送意图');
     }
     assert.deepEqual((await readJson(join(dir, 'state.json'))).pendingRequests, {});
   });

@@ -345,7 +345,7 @@ function openTask(task = null) {
   $('#taskAccountField').hidden = model.accounts.length === 1;
   $('#bookingGoal').value = task?.bookingGoal ?? selectedBookingGoal(task?.times ?? []);
   $('#taskName').value = task?.name ?? '';
-  $('#taskInterval').value = (task?.intervalMs ?? 100) / 1000;
+  $('#taskInterval').value = (task?.intervalMs ?? 80) / 1000;
   $('#taskDuration').value = (task?.durationMs ?? 120_000) / 60_000;
   schedulePreview(); $('#taskDialog').showModal(); $('#taskDialog').scrollTop = 0;
   void loadProject(task);

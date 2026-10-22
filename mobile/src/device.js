@@ -89,7 +89,7 @@ export function nativeTransport(device, token = null, accountId = token ?? 'unbo
       finally { options.signal?.removeEventListener('abort', cancel); }
       const endedAt = Date.now();
       const values = Object.fromEntries(Object.entries(result.headers).map(([key, value]) => [key.toLowerCase(), value]));
-      const nativeTiming = Object.fromEntries(['nativeQueueMs', 'dispatchPreparationMs', 'networkStartedAt', 'networkEndedAt', 'networkDurationMs']
+      const nativeTiming = Object.fromEntries(['nativeQueueMs', 'dispatchPreparationMs', 'networkStartedAt', 'networkHeadersEndedAt', 'networkEndedAt', 'networkDurationMs']
         .filter(key => Number.isFinite(result.timing?.[key]) && result.timing[key] >= 0).map(key => [key, result.timing[key]]));
       // Native durable marking happens after the JS reservation. Anchor the
       // next interval to the observed network phase, so slow preparation cannot
@@ -102,6 +102,7 @@ export function nativeTransport(device, token = null, accountId = token ?? 'unbo
       try { parsed = JSON.parse(result.body); } catch { /* Caller handles unknown responses. */ }
       const cooldownMs = gate.observe(parsed, { status: result.status, retryAfter: values['retry-after']?.join(', '), mutation });
       return { status: result.status, ok: result.status >= 200 && result.status < 300, startedAt, endedAt,
+        ...(nativeTiming.networkHeadersEndedAt !== undefined ? { headersEndedAt: nativeTiming.networkHeadersEndedAt } : {}),
         queueMs: startedAt - queuedAt,
         ...(Object.keys(nativeTiming).length ? { nativeTiming } : {}),
         cooldownMs, dispatchSignal: options.dispatchSignal,

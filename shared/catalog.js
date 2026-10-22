@@ -11,7 +11,7 @@ function check(signal, deadline) {
 // Merge all requested slots before applying preference order.
 export async function readCourtCatalog({ api, target, date, times = target.times ?? [],
   discoverTimes = false, signal, deadline = Infinity, tolerateUnavailable = false,
-  partialOnDeadline = false, timeoutMs, onQuery = () => {}, onRooms, onWait, onRateLimit = () => {} }) {
+  partialOnDeadline = false, timeoutMs, onQuery = () => {}, onRooms, onWait, onRateLimit = () => {}, onReleaseWait }) {
   const queries = new Set(times);
   const listedTimes = [];
   const issues = [];
@@ -73,6 +73,9 @@ export async function readCourtCatalog({ api, target, date, times = target.times
         issues.push({ date, time, venue: venue.CGBM, message: error.message, transient: isTransientQueryError(error) });
         if (['rate', 'server'].includes(error.outcome?.scope) || error.status === 429) {
           onRateLimit(error); break queryLoop;
+        }
+        if (error.outcome?.scope === 'release' && onReleaseWait) {
+          onReleaseWait(error); break queryLoop;
         }
         continue;
       }

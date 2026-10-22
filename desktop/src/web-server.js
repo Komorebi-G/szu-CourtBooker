@@ -144,7 +144,7 @@ function publicConfig(config) {
         preferSameCourt: target.preferSameCourt ?? project?.id === 'volleyball',
         includeOtherCourts: target.includeOtherCourts ?? false,
         releaseAt: bookingReleaseAt(target.date ?? defaultTargetDate(config)),
-        intervalMs: target.intervalMs ?? 100,
+        intervalMs: target.intervalMs ?? 80,
         durationMs: target.durationMs ?? 60_000,
         name: target.name,
         projectId: project?.id ?? target.project ?? '',
@@ -225,7 +225,7 @@ function taskFromBody(input, current) {
   if (input.includeOtherCourts !== undefined && typeof input.includeOtherCourts !== 'boolean') throw new Error('其余场地选项须为开关值');
   const intervalMs = Number(input.intervalMs);
   const durationMs = Number(input.durationMs);
-  if (!Number.isFinite(intervalMs) || intervalMs < 100 || intervalMs > 3_600_000) throw new Error('重试间隔须在 0.1 秒至 1 小时之间');
+  if (!Number.isFinite(intervalMs) || intervalMs < 80 || intervalMs > 3_600_000) throw new Error('重试间隔须在 0.08 秒至 1 小时之间');
   if (!Number.isFinite(durationMs) || durationMs < 1000 || durationMs > 86_400_000) throw new Error('持续时间须在 1 秒至 24 小时之间');
   return {
     ...Object.fromEntries(Object.entries(current ?? {}).filter(([key]) => key !== 'startAt')),

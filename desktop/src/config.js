@@ -10,7 +10,7 @@ const defaults = {
   scheduler: {
     releaseTime: '12:30:00',
     targetDate: 'tomorrow',
-    pollIntervalMs: 100,
+    pollIntervalMs: 80,
     pollJitterMs: 0,
     timeoutMs: 20_000,
     queryConcurrency: 6,

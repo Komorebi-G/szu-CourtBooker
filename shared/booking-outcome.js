@@ -24,7 +24,10 @@ export function classifyBookingResponse(response) {
   if (personalQuota) return { kind: 'account', message };
   if (/时段.*(过期|已开始|已结束)|预约时间已过|超过预约时间/.test(message)) return { kind: 'expired', message };
   if (/未开放|不开放|未到.*(预约|开放)|未到放号|预约时间未到|未开始预约|还未开放/.test(message)) {
-    return { kind: 'wait', message, ...(/放号|未到.*预约时间|预约时间未到|未开始预约/.test(message) ? { scope: 'release' } : {}) };
+    // The same school code also means a full court or a rate rejection. Only
+    // explicit date/release wording closes this date's other slot probes.
+    const release = /放号|未到.*预约时间|预约时间未到|未开始预约|(?:该|此|所选|预约)日期.*(?:暂未|尚未|还未|未)开放预约/.test(message);
+    return { kind: 'wait', message, ...(release ? { scope: 'release' } : {}) };
   }
   if (/无空位|没有空位|满场|满员|已约满|已满|余量不足|名额已满|(?:场地|时段).*(?:人数|容量|名额).*(?:上限|不足)|(?:场地|时段).*(?:已被.*(?:预约|预订))|已被(?:他人|其他人).*预约/.test(message)) {
     return { kind: 'retry', message };

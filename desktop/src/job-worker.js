@@ -68,11 +68,15 @@ async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = 
     persistenceError = error; controller.abort(); onFatal(error);
   };
   const persist = (durable = false) => {
+    clearTimeout(logPersistTimer); logPersistTimer = null;
     const snapshot = structuredClone(state);
     pending = pending.then(() => writeJson(join(dir, 'state.json'), snapshot, { durable }));
     // Surface storage failures and stop subsequent booking requests.
     pending.catch(storageFailed);
     return pending;
+  };
+  const schedulePersist = () => {
+    if (!logPersistTimer) logPersistTimer = setTimeout(() => { logPersistTimer = null; void persist(); }, 200);
   };
   const log = (level, message, details) => {
     const entry = recordDiagnostic(state.diagnostics, level, message, details);
@@ -84,7 +88,7 @@ async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = 
     journalPending.catch(storageFailed);
     // Append each event, but coalesce UI snapshots. The dispatch and response
     // boundaries below still await an immediate durable state write.
-    if (!logPersistTimer) logPersistTimer = setTimeout(() => { logPersistTimer = null; void persist(); }, 200);
+    schedulePersist();
   };
   const stop = async () => {
     if (await exists(join(dir, 'stop'))) { state.status = 'stopping'; controller.abort(); }
@@ -222,7 +226,7 @@ async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = 
           await persist();
         }
       },
-      onState: (status, details) => { Object.assign(state, details, { status }); void persist(); },
+      onState: (status, details) => { Object.assign(state, details, { status }); schedulePersist(); },
     });
     state.total = result.total;
     state.limited = result.limited;

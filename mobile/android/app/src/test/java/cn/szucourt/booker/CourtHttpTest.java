@@ -73,6 +73,20 @@ public class CourtHttpTest {
         assertTrue(result.networkEndedAt >= result.networkStartedAt);
         assertEquals(1, server.getRequestCount());
     }
+    @Test public void headerTimingPrecedesDelayedBodyWhileDurationIncludesBody() throws Exception {
+        server.enqueue(new MockResponse().setBody("complete").setBodyDelay(250, TimeUnit.MILLISECONDS));
+        long started = System.nanoTime();
+        CourtHttp.Result result = http.execute(request("index.do", false), () -> {});
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        assertEquals("complete", result.body);
+        assertTrue(result.networkHeadersEndedAt >= result.networkStartedAt);
+        assertTrue("Header timing must exclude the delayed response body",
+            result.networkEndedAt - result.networkHeadersEndedAt >= 200);
+        assertTrue("Network duration must still include reading the complete body",
+            result.networkDurationMs >= 200);
+        assertTrue(result.networkDurationMs <= elapsedMs);
+        assertEquals(1, server.getRequestCount());
+    }
     @Test public void brokenReusedConnectionRecovers() throws Exception {
         server.enqueue(new MockResponse().setBody("warm"));
         server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST));

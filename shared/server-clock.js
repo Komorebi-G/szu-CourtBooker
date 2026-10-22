@@ -5,18 +5,22 @@ import { sleep } from './utils.js';
 // request and truncates fractional seconds, its offset lies in this interval.
 // This measures the HTTP server clock; a proxy/application clock can differ.
 export function serverClockInterval(sample) {
-  const { serverDateMs, startedAt, endedAt, age } = sample ?? {};
+  const { serverDateMs, startedAt, endedAt, headersEndedAt, age } = sample ?? {};
   if (age !== undefined && age !== null && age !== '' && (!/^\d+$/.test(String(age)) || Number(age) > 0)) {
     return { valid: false, reason: 'cached_response' };
   }
   if (!Number.isFinite(serverDateMs) || serverDateMs % 1000 !== 0) {
     return { valid: false, reason: 'missing_or_invalid_date' };
   }
-  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt < startedAt) {
+  const receivedAt = headersEndedAt ?? endedAt;
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt < startedAt
+    || !Number.isFinite(receivedAt) || receivedAt < startedAt || receivedAt > endedAt) {
     return { valid: false, reason: 'invalid_request_timing' };
   }
-  return { valid: true, lowerOffsetMs: serverDateMs - endedAt,
-    upperOffsetMs: serverDateMs + 1000 - startedAt, rttMs: endedAt - startedAt };
+  // Date is already fixed when headers arrive. Body transfer and a native
+  // bridge returning later cannot make the header's generation time later.
+  return { valid: true, lowerOffsetMs: serverDateMs - receivedAt,
+    upperOffsetMs: serverDateMs + 1000 - startedAt, rttMs: receivedAt - startedAt };
 }
 
 export function intersectServerClockSamples(samples, { maxUncertaintyMs = 1000, priorEstimate } = {}) {
@@ -39,7 +43,7 @@ export function intersectServerClockSamples(samples, { maxUncertaintyMs = 1000, 
   const reliable = enoughSamples && Number.isFinite(uncertaintyMs) && uncertaintyMs <= maxUncertaintyMs;
   return { reliable, offsetMs: reliable ? (lowerOffsetMs + upperOffsetMs) / 2 : 0,
     ...(samples.length ? { lowerOffsetMs, upperOffsetMs, uncertaintyMs,
-      calibratedAt: samples.at(-1).endedAt, minRttMs: Math.min(...samples.map((sample) => sample.endedAt - sample.startedAt)) } : {}),
+      calibratedAt: samples.at(-1).endedAt, minRttMs: Math.min(...samples.map((sample) => serverClockInterval(sample).rttMs)) } : {}),
     sampleCount: samples.length, ...(usedPrior ? { usedPrior: true } : {}),
     ...(reliable ? {} : { reason: !enoughSamples ? 'insufficient_samples' : 'wide_uncertainty' }) };
 }
@@ -49,6 +53,7 @@ export function intersectServerClockSamples(samples, { maxUncertaintyMs = 1000, 
 // Deadline and cancellation also bound adapters that ignore request options.
 export async function estimateServerClock(api, { signal, deadline = Infinity, maxSamples = 5,
   intervalMs = 250, requestTimeoutMs = 1000, maxUncertaintyMs = 1000,
+  targetUncertaintyMs,
   priorEstimate, adaptiveBoundary = false, maxPriorAgeMs = 60_000, initialSamples = [],
   now = Date.now, pause = sleep } = {}) {
   const samples = initialSamples.filter((sample) => serverClockInterval(sample).valid
@@ -59,10 +64,14 @@ export async function estimateServerClock(api, { signal, deadline = Infinity, ma
     && priorEstimate.upperOffsetMs > priorEstimate.lowerOffsetMs
     && priorEstimate.upperOffsetMs - priorEstimate.lowerOffsetMs <= maxUncertaintyMs ? priorEstimate : undefined;
   const estimateOptions = { maxUncertaintyMs, priorEstimate: prior };
+  const precisionTarget = Number.isFinite(targetUncertaintyMs) && targetUncertaintyMs >= 0 ? targetUncertaintyMs : undefined;
+  const atTarget = (estimate) => estimate.reliable && precisionTarget !== undefined && estimate.uncertaintyMs <= precisionTarget;
   let discardedPrior = false;
   const estimateCurrent = () => ({ ...intersectServerClockSamples(samples, estimateOptions),
     ...(discardedPrior ? { discardedPrior: true } : {}) });
-  if (samples.length && estimateCurrent().reliable) return { ...estimateCurrent(), reusedSamples: samples.length };
+  if (samples.length && estimateCurrent().reliable && (precisionTarget === undefined || atTarget(estimateCurrent()))) {
+    return { ...estimateCurrent(), reusedSamples: samples.length };
+  }
   if (estimateCurrent().reason === 'conflicting_samples') samples.length = 0;
   if (typeof api.sampleServerClock !== 'function') {
     return { reliable: false, offsetMs: 0, sampleCount: 0, reason: 'clock_sampling_unavailable' };
@@ -125,6 +134,7 @@ export async function estimateServerClock(api, { signal, deadline = Infinity, ma
       if (['cached_response', 'missing_or_invalid_date', 'invalid_request_timing', 'conflicting_samples'].includes(estimate.reason)) {
         return estimate;
       }
+      if (atTarget(estimate)) return estimate;
     } catch (error) {
       signal?.throwIfAborted();
       if (error instanceof SessionExpiredError) throw error;

@@ -80,12 +80,13 @@ test('诊断前半段保留首单与各阶段耗时，保存事件不增加提�
   recordDiagnostic(diagnostics, 'REQUEST', '派发', { ...key, event: 'booking_dispatch', sentAt: diagnostics.startedAtMs + 154 });
   recordDiagnostic(diagnostics, 'INFO', '保存', { ...key, event: 'booking_persistence', durationMs: 23 });
   recordDiagnostic(diagnostics, 'OK', '成功', { ...key, event: 'booking_response', outcome: 'success', durationMs: 950,
-    transportQueueMs: 15, nativeQueueMs: 2, dispatchPreparationMs: 7, networkDurationMs: 910 });
+    transportQueueMs: 15, nativeQueueMs: 2, dispatchPreparationMs: 7, networkDurationMs: 910, headersDurationMs: 850 });
   recordDiagnostic(diagnostics, 'INFO', '保存', { ...key, event: 'booking_persistence', durationMs: 11 });
   const slot = Object.values(diagnostics.slotSummaries)[0];
   assert.equal(diagnostics.firstDispatchElapsedMs, 154); assert.equal(slot.attempts, 1); assert.equal(slot.lastOutcome, 'success');
   assert.equal(slot.lastPersistenceMs, 11); assert.equal(slot.lastTransportQueueMs, 15);
   assert.equal(slot.lastNativeQueueMs, 2); assert.equal(slot.lastDispatchPreparationMs, 7); assert.equal(slot.lastNetworkDurationMs, 910);
+  assert.equal(slot.lastHeadersDurationMs, 850);
 });
 
 test('HTML网关503仍是可重试网络故障，登录重定向仍是身份失效', async () => {

@@ -11,6 +11,18 @@ test('秒级 Date 的时钟偏差范围包含完整 RTT 和一秒量化误差', 
   assert.deepEqual(interval, { valid: true, lowerOffsetMs: -170, upperOffsetMs: 990, rttMs: 160 });
 });
 
+test('Date 校时止于实际收到响应头，慢正文不扩大网络区间；旧样本继续兼容', () => {
+  const value = sample(10010, 10900, 10000, { headersEndedAt: 10050 });
+  assert.deepEqual(serverClockInterval(value), { valid: true, lowerOffsetMs: -50, upperOffsetMs: 990, rttMs: 40 });
+  const estimate = intersectServerClockSamples([value, sample(10260, 11000, 10000, { headersEndedAt: 10280 })]);
+  assert.equal(estimate.minRttMs, 20);
+  assert.equal(estimate.uncertaintyMs, 790);
+  for (const headersEndedAt of [10009, 10901, NaN]) {
+    assert.equal(serverClockInterval({ ...value, headersEndedAt }).reason, 'invalid_request_timing');
+  }
+  assert.equal(serverClockInterval(sample(10010, 10900, 10000)).rttMs, 890);
+});
+
 test('跨秒样本交集收窄不确定性，不假设上下行延迟对称', () => {
   const samples = [sample(10010, 10050, 10000), sample(10260, 10280, 10000),
     sample(10510, 10540, 10000), sample(10760, 10810, 11000), sample(11010, 11090, 11000)];
@@ -87,6 +99,30 @@ test('相同三次请求以已有范围瞄准秒跳变，误差由 300 ms 缩至
   assert.ok(adaptiveEstimate.lowerOffsetMs <= 320 && adaptiveEstimate.upperOffsetMs > 320);
   assert.deepEqual(adaptive.calls.map(({ at }) => at), [10010, 10640, 11705]);
   assert.ok(adaptive.now() < 12700, '三个边界请求可在临近放号的截止时间内完成');
+});
+
+test('校时精度目标独立于可靠阈值，达到目标即停止，不耗尽六次请求预算', async () => {
+  const clock = simulatedClock();
+  const estimate = await estimateServerClock(clock.api, { maxSamples: 6, intervalMs: 150, priorEstimate: prior,
+    adaptiveBoundary: true, targetUncertaintyMs: 150, now: clock.now, pause: clock.pause });
+  assert.equal(estimate.reliable, true); assert.equal(clock.calls.length, 3);
+  assert.ok(estimate.uncertaintyMs <= 150);
+  assert.ok(estimate.lowerOffsetMs <= 320 && estimate.upperOffsetMs > 320);
+});
+
+test('已有可靠但宽的样本仍按精度目标继续收窄，截止前保留未达目标的有效范围', async () => {
+  const clock = simulatedClock({ start: 1500, offsetMs: 0 });
+  const estimate = await estimateServerClock(clock.api, { maxSamples: 6, targetUncertaintyMs: 150,
+    adaptiveBoundary: true, initialSamples: [sample(1000, 1100, 1000), sample(1300, 1400, 1000)],
+    now: clock.now, pause: clock.pause });
+  assert.ok(clock.calls.length > 0, '800ms宽的可靠区间不能冒充150ms目标');
+  assert.equal(estimate.reliable, true); assert.ok(estimate.uncertaintyMs <= 150);
+  assert.ok(estimate.lowerOffsetMs <= 0 && estimate.upperOffsetMs > 0);
+  const limited = simulatedClock();
+  const partial = await estimateServerClock(limited.api, { maxSamples: 6, targetUncertaintyMs: 1,
+    adaptiveBoundary: true, priorEstimate: prior, deadline: 10500, now: limited.now, pause: limited.pause });
+  assert.equal(partial.reliable, true); assert.ok(partial.uncertaintyMs > 1);
+  assert.equal(limited.calls.length, 1); assert.ok(limited.now() < 10500);
 });
 
 test('边界取样即使上下行延迟完全不对称，区间仍包含真实偏差', async () => {
@@ -193,6 +229,23 @@ test('API 校时传递取消和截止时间，旧偏差接口不再把缺少 Dat
   assert.equal(value.age, '0');
   api.client.post = async () => ({ startedAt: 100, endedAt: 200 });
   await assert.rejects(api.sampleServerOffset(), /missing_or_invalid_date/);
+});
+
+test('API 从同一原生时钟取得请求和响应头边界，不把桥接等待当成网络 RTT', async () => {
+  const api = new SzuVenueApi({ async post() {
+    return { data: [], date: 'Thu, 01 Oct 2026 04:00:00 GMT', startedAt: 100, headersEndedAt: 550, endedAt: 600,
+      nativeTiming: { networkStartedAt: 200, networkHeadersEndedAt: 220, networkEndedAt: 400, networkDurationMs: 200 } };
+  } });
+  const result = await api.sampleServerClock();
+  assert.equal(result.startedAt, 200); assert.equal(result.headersEndedAt, 220); assert.equal(result.endedAt, 400);
+  assert.equal(serverClockInterval(result).rttMs, 20);
+  await api.getSportVenueData();
+  assert.deepEqual(api.getRecentServerClockSamples(), [result], '身份与项目的被动样本也使用同样的真实边界');
+  api.client.post = async () => ({ date: 'Thu, 01 Oct 2026 04:00:00 GMT', startedAt: 100, endedAt: 600,
+    nativeTiming: { networkStartedAt: 200, networkEndedAt: 400, networkDurationMs: 200 } });
+  const legacy = await api.sampleServerClock();
+  assert.equal(legacy.startedAt, 100); assert.equal(legacy.endedAt, 600);
+  assert.equal(serverClockInterval(legacy).rttMs, 500, '旧原生适配器缺头时间时仍保留保守范围');
 });
 
 test('API 截止/取消后不派发任何校时请求', async () => {

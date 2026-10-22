@@ -218,7 +218,7 @@ function openPlan(id, source = null) {
   $('#bookingGoal').value = plan?.bookingGoal ?? selectedBookingGoal(plan?.times ?? []);
   $('#sameCourt').checked = plan?.preferSameCourt ?? false;
   $('#includeOtherCourts').checked = plan?.includeOtherCourts ?? false;
-  $('#interval').value = (plan?.intervalMs ?? 100) / 1000; $('#duration').value = (plan?.durationMs ?? 120000) / 60000;
+  $('#interval').value = (plan?.intervalMs ?? 80) / 1000; $('#duration').value = (plan?.durationMs ?? 120000) / 60000;
   choices = { times: [...(plan?.times ?? [])], courts: [...(plan?.courts ?? ['*'])], labels: { ...plan?.courtLabels }, catalog: null, customGoal: false, preserveGoal: Boolean(plan) };
   catalogError = ''; loadCached(); $('#planDialog').showModal(); $('#planDialog').scrollTop = 0;
   if (native) void loadSchoolChoices();

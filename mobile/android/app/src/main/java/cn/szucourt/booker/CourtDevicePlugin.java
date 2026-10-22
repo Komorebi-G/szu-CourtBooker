@@ -296,6 +296,7 @@ public class CourtDevicePlugin extends Plugin {
                 JSObject timing = new JSObject(); timing.put("nativeQueueMs", nativeQueueMs);
                 timing.put("dispatchPreparationMs", response.dispatchPreparationMs);
                 timing.put("networkStartedAt", response.networkStartedAt); timing.put("networkEndedAt", response.networkEndedAt);
+                timing.put("networkHeadersEndedAt", response.networkHeadersEndedAt);
                 timing.put("networkDurationMs", response.networkDurationMs); result.put("timing", timing);
                 result.put("body", response.body); call.resolve(result);
             } catch (CourtExecutionGate.NotSent error) {

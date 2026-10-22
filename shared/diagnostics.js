@@ -47,7 +47,8 @@ export function recordDiagnostic(diagnostics, level, message, details) {
     Object.assign(slot, { lastOutcome: details.outcome, lastMessage: diagnosticValue(details.message),
       lastCourt: details.court, lastDurationMs: details.durationMs });
     if (event === 'booking_response') for (const [from, to] of Object.entries({ transportQueueMs: 'lastTransportQueueMs',
-      nativeQueueMs: 'lastNativeQueueMs', dispatchPreparationMs: 'lastDispatchPreparationMs', networkDurationMs: 'lastNetworkDurationMs' })) {
+      nativeQueueMs: 'lastNativeQueueMs', dispatchPreparationMs: 'lastDispatchPreparationMs', networkDurationMs: 'lastNetworkDurationMs',
+      headersDurationMs: 'lastHeadersDurationMs' })) {
       if (Number.isFinite(details[from])) slot[to] = details[from];
     }
   }

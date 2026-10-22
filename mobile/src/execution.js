@@ -25,7 +25,7 @@ export function validatePlan(plan) {
     if (plan[key] !== undefined && typeof plan[key] !== 'boolean') throw new Error('场地偏好选项须为开关值');
   }
   if (!Array.isArray(plan.courts) || !plan.courts.length || plan.courts.some((c) => typeof c !== 'string' || !c.trim())) throw new Error('至少选择一个场地');
-  if (!Number.isFinite(plan.intervalMs) || plan.intervalMs < 100 || plan.intervalMs > 3600000) throw new Error('间隔须为 0.1 至 3600 秒');
+  if (!Number.isFinite(plan.intervalMs) || plan.intervalMs < 80 || plan.intervalMs > 3600000) throw new Error('间隔须为 0.08 至 3600 秒');
   if (!Number.isFinite(plan.durationMs) || plan.durationMs < 1000 || plan.durationMs > 86400000) throw new Error('最长持续时间须为 1 秒至 24 小时');
   return { ...plan, name: plan.name?.trim() || `${plan.date} ${project.label} ${plan.times[0]}` };
 }

@@ -146,7 +146,7 @@ export class CoreHttpClient {
       },
       signal: combined.signal,
     });
-      headersEndedAt = Date.now();
+      headersEndedAt = response.headersEndedAt ?? Date.now();
       this.updateCookies(response);
       text = await response.text();
       endedAt = Date.now();

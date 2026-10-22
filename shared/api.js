@@ -3,6 +3,19 @@ import { classifyBookingResponse } from './booking-outcome.js';
 import { serverClockInterval } from './server-clock.js';
 import { resolveDate, splitTimeSlot } from './utils.js';
 
+function clockSample(response) {
+  const native = response.nativeTiming;
+  // These three timestamps share Android's wall clock. Use them together so
+  // Java queueing, body transfer and JS bridge delivery do not masquerade as
+  // network time. Older adapters keep their broader, conservative interval.
+  const nativeHeaders = ['networkStartedAt', 'networkHeadersEndedAt', 'networkEndedAt']
+    .every(field => Number.isFinite(native?.[field]));
+  return { serverDateMs: Date.parse(response.date),
+    startedAt: nativeHeaders ? native.networkStartedAt : response.startedAt,
+    headersEndedAt: nativeHeaders ? native.networkHeadersEndedAt : response.headersEndedAt,
+    endedAt: nativeHeaders ? native.networkEndedAt : response.endedAt, age: response.age };
+}
+
 // Preserve the receiver of stateful API methods (especially identity). Prototype
 // wrappers split the cache between preflight and book(), allowing a second login.
 export function withBooking(api, book) {
@@ -22,7 +35,7 @@ export class SzuVenueApi {
   }
 
   rememberClock(response) {
-    const sample = { serverDateMs: Date.parse(response.date), startedAt: response.startedAt, endedAt: response.endedAt, age: response.age };
+    const sample = clockSample(response);
     if (serverClockInterval(sample).valid) this.clockSamples = [...this.clockSamples, sample].slice(-2);
   }
   getRecentServerClockSamples() { return this.clockSamples; }
@@ -185,10 +198,13 @@ export class SzuVenueApi {
     if (!response || Array.isArray(response) || typeof response.code !== 'string' || !response.code.trim()) {
       throw new Error('预约接口未返回明确业务结果，结果待确认，请核对学校“我的预约”');
     }
+    const timing = clockSample(request);
+    const headersDurationMs = timing.headersEndedAt - timing.startedAt;
     return { ...response, ...(persistenceError ? { persistenceError } : {}), requestTiming: { httpStatus: request.status,
       startedAt: request.startedAt, endedAt: request.endedAt,
       transportQueueMs: request.queueMs ?? 0, durationMs: (request.endedAt ?? Date.now()) - request.startedAt,
       headersEndedAt: request.headersEndedAt, cooldownMs: request.cooldownMs, retryAt: request.retryAt, policyObserved: request.policyObserved,
+      ...(Number.isFinite(headersDurationMs) && headersDurationMs >= 0 ? { headersDurationMs } : {}),
       ...request.nativeTiming } };
   }
 
@@ -250,8 +266,7 @@ export class SzuVenueApi {
     });
     signal?.throwIfAborted();
     this.checkQuery(response);
-    return { serverDateMs: response.date ? Date.parse(response.date) : NaN,
-      startedAt: response.startedAt, endedAt: response.endedAt, age: response.age };
+    return clockSample(response);
   }
 
   async sampleServerOffset(options) {

@@ -176,7 +176,7 @@ export class JobStore {
     const job = { id, taskId: target.id, mode, releaseAt, sessionPath: account.sessionPath ?? this.sessionPath,
       accountId: target.accountId ?? 'default', accountName: account.name ?? '我的账号', accountIdentityId: account.userId,
       createdAt: new Date().toISOString(), config: { ...config,
-        scheduler: { ...config.scheduler, pollIntervalMs: target.intervalMs ?? 100,
+        scheduler: { ...config.scheduler, pollIntervalMs: target.intervalMs ?? 80,
           pollJitterMs: 0, timeoutMs: target.durationMs ?? 60_000 },
         targets: [{ ...target, enabled: true }] } };
     await writeJson(join(dir, 'job.json'), job);

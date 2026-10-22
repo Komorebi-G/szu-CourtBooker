@@ -264,8 +264,16 @@ test('共用网络层携带独立Cookie并保存响应更新', async () => {
     return { status: 200, ok: true, headers: { get: () => null, getSetCookie: () => ['_WEU=B; Path=/qljfwapp/; Domain=ehall.szu.edu.cn'] }, text: async () => '{"ok":true}' }; }, save: async (value) => { saved = structuredClone(value); } });
   await client.post('test', {}); await client.flush(); assert.equal(sent, '_WEU=A'); assert.equal(saved.cookies[0].value, 'B');
 });
-test('手机允许0.1秒间隔，同账号多个方案合计两个时段即完成', async () => {
-  const f = fixture(); f.plan.intervalMs = 100; validatePlan(f.plan);
+test('手机提交间隔允许80毫秒，旧方案100毫秒保持原值，79毫秒拒绝保存', () => {
+  const { plan } = fixture();
+  for (const intervalMs of [80, 100]) {
+    assert.equal(validatePlan({ ...plan, intervalMs }).intervalMs, intervalMs);
+  }
+  assert.throws(() => validatePlan({ ...plan, intervalMs: 79 }), /间隔须为 0\.08/);
+});
+
+for (const intervalMs of [80, 100]) test(`手机允许${intervalMs}毫秒间隔，同账号多个方案合计两个时段即完成`, async () => {
+  const f = fixture(); f.plan.intervalMs = intervalMs; validatePlan(f.plan);
   const result = await f.runner.start([f.plan, { ...f.plan, id: 'p2', times: ['17:00-18:00', '18:00-19:00'] }], 'now');
   assert.equal(result.status, 'partial'); assert.equal(f.calls.length, 2);
   assert.equal(result.successes.length, 2); assert.ok(result.items.some((i) => i.limited));

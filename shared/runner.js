@@ -86,7 +86,7 @@ export async function waitForRelease({ api, scheduler, immediate, log, signal, r
     }
     if (!rechecked && (!prepare || prepared) && releaseAt - Date.now() <= 3000) {
       rechecked = true;
-      const fresh = await estimateServerClock(api, { signal, maxSamples: 3, intervalMs: 200,
+      const fresh = await estimateServerClock(api, { signal, maxSamples: 6, intervalMs: 200, targetUncertaintyMs: 200,
         adaptiveBoundary: true, priorEstimate: clock, deadline: releaseAt - 300 });
       if (fresh.reliable) {
         clock = fresh;
@@ -144,7 +144,10 @@ export async function runBooking({ api, client, config, targets, date, immediate
   let tasks = [];
   let requestSequence = 0;
   let firstAttemptAt;
-  let releaseBlocked = false, pausedRound = -1, bookingStarted = false;
+  const releaseBlocked = new Set(), openingReleaseProbes = new Map();
+  const releaseKey = (task) => JSON.stringify([task.date, task.target.campusCode, task.target.sportCode, task.target.modeCode]);
+  const blockedForRelease = (task) => releaseBlocked.has(releaseKey(task));
+  let pausedRound = -1, bookingStarted = false;
   const gate = () => api.getRequestGate?.() ?? quota.requestGate(quotaAccount);
   const reportWait = ({ message, ...details }) => onState(bookingStarted ? 'booking' : 'waiting', { ...details,
     activityMessage: message, retryAt: details.retryAt });
@@ -181,13 +184,13 @@ export async function runBooking({ api, client, config, targets, date, immediate
   const done = (task) => completed.has(task.key) || expiredTasks.has(task.key) || conflicts.has(task.key)
     || reached(task) || !allows(task, true)
     || quota.full(quotaKey(task)) || quota.error(quotaKey(task));
-  const retireFixedRoom = (task) => {
-    if (!task.fixedRoom || completed.has(task.key) || Date.now() < releaseFastUntil) return;
-    delete task.fixedRoom; task.rooms = []; task.warmed = false; task.needsRefresh = true;
-    task.lastOutcome = 'refresh_required'; task.lastMessage = '快速提交窗口已结束，重新查询空位';
+  const retireOpeningRooms = (task, force = false) => {
+    if (!task.openingRooms || completed.has(task.key) || (!force && Date.now() < releaseFastUntil)) return;
+    delete task.openingRooms; task.rooms = []; task.warmed = false; task.needsRefresh = true;
+    task.lastOutcome = 'refresh_required'; task.lastMessage = force ? '重新查询场地空位' : '快速提交窗口已结束，重新查询空位';
   };
   const expire = (task) => {
-    retireFixedRoom(task);
+    retireOpeningRooms(task);
     if (live && clockReady && !completed.has(task.key) && schoolNow() >= slotStartAt(task.date, task.time)) {
       if (!expiredTasks.has(task.key)) log('INFO', `时段已开始，跳过：${task.target.name} / ${task.time}`);
       expiredTasks.add(task.key);
@@ -249,25 +252,30 @@ export async function runBooking({ api, client, config, targets, date, immediate
     tasks = batches.flat(); total = tasks.length;
     if (live && !immediate && Array.isArray(knownRooms)) for (const task of tasks) {
       const target = task.target;
-      if (target.includeOtherCourts || target.courtNames?.length !== 1) continue;
-      const selected = target.courtNames[0];
-      const matches = knownRooms.filter(room => room && ['WID', 'CDMC', 'CGBM', 'XMDM', 'XQDM']
-        .every(field => typeof room[field] === 'string' && room[field].trim())
-        && (room.WID === selected || room.CDMC === selected)
-        && room.XMDM === target.sportCode && room.XQDM === target.campusCode
-        && target.venues.some(venue => venue.CGBM === room.CGBM));
-      if (matches.length !== 1) continue;
+      if (!target.courtNames?.length) continue;
+      const fields = ['WID', 'CDMC', 'CGBM', 'CQBM', 'XMDM', 'XQDM'];
+      const rooms = target.courtNames.map(selected => {
+        const matches = knownRooms.filter(room => room && ['WID', 'CDMC', 'CGBM', 'XMDM', 'XQDM']
+          .every(field => typeof room[field] === 'string' && room[field].trim())
+          && (room.WID === selected || room.CDMC === selected)
+          && room.XMDM === target.sportCode && room.XQDM === target.campusCode
+          && target.venues.some(venue => venue.CGBM === room.CGBM))
+          .map(room => Object.fromEntries(fields.filter(field => room[field] !== undefined).map(field => [field, room[field]])));
+        const unique = [...new Map(matches.map(room => [JSON.stringify(room), room])).values()];
+        return unique.length === 1 ? unique[0] : null;
+      });
+      if (rooms.some(room => !room)) continue;
       // Only a countdown's first dispatch may use structural cache to avoid a
-      // query at release. Salvage and all subsequent attempts use live vacancies.
-      task.fixedRoom = Object.fromEntries(['WID', 'CDMC', 'CGBM', 'CQBM', 'XMDM', 'XQDM']
-        .filter(field => matches[0][field] !== undefined).map(field => [field, matches[0][field]]));
-      task.rooms = [task.fixedRoom]; task.warmed = true;
+      // query at release. Keep preference order for the next slot's same-court
+      // choice, but never sweep this structural list after a rejected POST.
+      task.openingRooms = [...new Map(rooms.map(room => [room.WID, room])).values()];
+      task.rooms = task.openingRooms; task.warmed = true;
     }
     if (!total) throw new Error('没有可执行的预约时段');
     if (live) for (const key of new Set(tasks.map(quotaKey))) closeScopes.push(quota.open(key));
     log('PLAN', '本次执行规则：候选时段、场地顺序与同场偏好', {
       event: 'execution_plan', date, live, immediate, parallelSlots: false,
-      fixedCourtSlots: tasks.filter(task => task.fixedRoom).length,
+      fixedCourtSlots: tasks.filter(task => task.openingRooms).length,
       targets: targets.map((t) => ({ name: t.name, times: [...new Set(t.times)].sort(),
         courts: t.courtNames, bookingGoal: bookingGoal(t), preferSameCourt: Boolean(t.preferSameCourt), includeOtherCourts: Boolean(t.includeOtherCourts) })),
       pollIntervalMs: scheduler.pollIntervalMs, timeoutMs: scheduler.timeoutMs,
@@ -340,7 +348,7 @@ export async function runBooking({ api, client, config, targets, date, immediate
           const warmupUntil = releaseAt - (releaseAt - Date.now() > 3000 ? 3000 : 100);
           for (const task of tasks) {
             if (Date.now() >= warmupUntil) break;
-            if (!done(task) && !task.fixedRoom) await loadRooms([task], { warmupUntil });
+            if (!done(task) && !task.openingRooms && !blockedForRelease(task)) await loadRooms([task], { warmupUntil });
           }
           const warmed = tasks.filter((task) => task.warmed && !done(task));
           // Prepare the second slot even when its final court depends on the
@@ -369,7 +377,7 @@ export async function runBooking({ api, client, config, targets, date, immediate
       if (tasks.every(done)) return deliver();
     }
     async function loadRooms(batch, { warmupUntil, attemptReady = false } = {}) {
-      const pending = batch.filter((task) => !expire(task) && !task.fixedRoom && !done(task));
+      const pending = batch.filter((task) => !expire(task) && !task.openingRooms && !done(task));
       if (!pending.length && live) return;
       const target = batch[0].target;
       for (const task of pending) task.needsRefresh = false;
@@ -381,6 +389,7 @@ export async function runBooking({ api, client, config, targets, date, immediate
           partialOnDeadline: Boolean(warmupUntil),
           tolerateUnavailable: live,
           onWait: reportWait,
+          onReleaseWait: () => releaseBlocked.add(releaseKey(batch[0])),
           onRateLimit: (error) => {
             if (!error.outcome?.policyObserved && !api.getRequestGate?.()) gate().reject(error.message);
             if (error.outcome?.scope === 'rate' || error.status === 429) quota.observeOutcome(quotaAccount,
@@ -407,7 +416,7 @@ export async function runBooking({ api, client, config, targets, date, immediate
             const firstChoice = task.target.courtNames?.[0];
             if (!choice.preferred && firstChoice && ![choice.rooms[0].WID, choice.rooms[0].CDMC].includes(firstChoice)) return;
             await attempt(task);
-            if (done(task) || releaseBlocked || pausedRound === round || Date.now() >= deadline) return false;
+            if (done(task) || blockedForRelease(task) || pausedRound === round || Date.now() >= deadline) return false;
           } : undefined,
           onQuery: (details) => {
             metrics.queries++;
@@ -418,17 +427,21 @@ export async function runBooking({ api, client, config, targets, date, immediate
         const catalog = live ? await readCourtCatalog(input)
           : await readReference({ ...input, dates: referenceDates(date), tolerateUnavailable: true });
         for (const task of batch) {
-          if (task.fixedRoom) continue;
+          if (task.openingRooms) continue;
           // Reference catalogs may merge dates/times. Live views stay scoped to
           // this slot; an empty first slot must not borrow the later slot's rooms.
           const rooms = live ? catalog.roomsByTime[task.time] ?? [] : catalog.rooms;
           // A failed query cannot prove an old vacancy is still available.
           task.rooms = rooms;
           task.needsRefresh ||= !rooms.some(room => !room.disabled);
-          if (!task.rooms.length) {
+          if (!task.rooms.some(room => !room.disabled)) {
             const issue = catalog.issues.find((i) => i.time === task.time);
             task.lastOutcome = issue ? 'query_unavailable' : 'empty_catalog';
             task.lastMessage = issue?.message;
+          } else if (task.lastOutcome === 'refresh_required') {
+            // This query has satisfied the requested refresh. Leaving the old
+            // marker would turn subsequent empty rounds into zero-delay reads.
+            delete task.lastOutcome; delete task.lastMessage;
           }
           task.lastRefresh = Date.now();
           task.warmed = Boolean(warmupUntil && rooms.length);
@@ -478,7 +491,7 @@ export async function runBooking({ api, client, config, targets, date, immediate
       task.warmed = false;
       signal?.throwIfAborted();
       await reuse(task);
-      if (releaseBlocked || pausedRound === round || expire(task) || done(task) || !allows(task)) return;
+      if (blockedForRelease(task) || pausedRound === round || expire(task) || done(task) || !allows(task)) return;
       if (task.attemptedRound !== round) { task.attemptedRound = round; task.attemptedRooms = new Set(); }
       const { rooms, preferred, neighbor, anchor } = candidateRooms(task);
       const choice = { event: 'court_order', round, targetIndex: task.target.targetIndex, date, time: task.time,
@@ -490,7 +503,7 @@ export async function runBooking({ api, client, config, targets, date, immediate
           : task.target.courtNames ? ' · 按原场地顺序' : ' · 优先查询中有空位的场地'}`, choice);
       }
       for (const room of rooms) {
-        const fromFixedRoom = task.fixedRoom === room;
+        const fromOpeningRooms = Boolean(task.openingRooms);
         if (task.attemptedRooms.has(room.WID)) continue;
         signal?.throwIfAborted();
         if (fatalError) throw fatalError;
@@ -504,12 +517,12 @@ export async function runBooking({ api, client, config, targets, date, immediate
           signal?.throwIfAborted();
           if (fatalError) throw fatalError;
           if (pausedRound === round) return { code: 'LOCAL_COOLDOWN', msg: '账号正在等待重试' };
-          if (releaseBlocked) return { code: '1', msg: '预约时间未到' };
+          if (blockedForRelease(task)) return { code: '1', msg: '预约时间未到' };
           if (expire(task)) return { code: 'SLOT_EXPIRED', msg: '时段已开始' };
           if (!allows(task, true)) return { code: 'GOAL_REACHED', msg: allows(task) ? '剩余名额不足以完成连续两段' : '此时段不符合剩余预约目标' };
           if (quota.error(quotaKey(task))) return { code: 'LOCAL_ACCOUNT_STOPPED', msg: quota.error(quotaKey(task)) };
           if (Date.now() >= deadline) return { code: 'EXPIRED', msg: '执行窗口已结束' };
-          if (fromFixedRoom && Date.now() >= releaseFastUntil) return { code: 'LOCAL_REFRESH_REQUIRED', msg: '快速提交窗口已结束，重新查询空位' };
+          if (fromOpeningRooms && Date.now() >= releaseFastUntil) return { code: 'LOCAL_REFRESH_REQUIRED', msg: '快速提交窗口已结束，重新查询空位' };
           await gate().wait({ signal, deadline: Math.min(deadline, localSlotDeadline(task)), reserve: false, onWait: reportWait });
           const startedAt = Date.now();
           firstAttemptAt ??= startedAt;
@@ -528,7 +541,7 @@ export async function runBooking({ api, client, config, targets, date, immediate
                 : expire(task) ? { code: 'SLOT_EXPIRED', msg: '时段已开始' }
                   : !allows(task, true) ? { code: 'GOAL_REACHED', msg: allows(task) ? '剩余名额不足以完成连续两段' : '此时段不符合剩余预约目标' }
                     : quota.full(quotaKey(task)) ? { code: 'LOCAL_DAILY_LIMIT', msg: '已达当天两时段上限' }
-                      : fromFixedRoom && Date.now() >= releaseFastUntil
+                      : fromOpeningRooms && Date.now() >= releaseFastUntil
                         ? { code: 'LOCAL_REFRESH_REQUIRED', msg: '快速提交窗口已结束，重新查询空位' } : null;
               if (blocked) throw Object.assign(new RequestNotSentError(blocked.msg), { bookingResponse: blocked });
             };
@@ -538,7 +551,7 @@ export async function runBooking({ api, client, config, targets, date, immediate
             const response = await api.book({ date, modeCode: task.target.modeCode, room, time: task.time, requestId,
               deadline: Math.min(deadline, localSlotDeadline(task)), signal, beforeDispatch,
               intervalMs: scheduler.pollIntervalMs, onWait: reportWait,
-              dispatchBefore: fromFixedRoom ? releaseFastUntil : undefined,
+              dispatchBefore: fromOpeningRooms ? releaseFastUntil : undefined,
               onDispatch: ({ startedAt: sentAt }) => {
                 metrics.dispatched++;
                 log('REQUEST', `已调用预约传输：${label}`, { event: 'booking_dispatch', ...requestDetails,
@@ -552,8 +565,22 @@ export async function runBooking({ api, client, config, targets, date, immediate
               reportWait({ activity: 'cooldown', retryAt: gate().cooldownUntil, message: outcome.message });
             }
             if (['retry', 'wait'].includes(outcome.kind) && !outcome.scope) task.needsRefresh = true;
-            if (task.fixedRoom && outcome.kind !== 'success') { delete task.fixedRoom; task.needsRefresh = true; }
-            if (outcome.kind === 'wait' && outcome.scope === 'release') releaseBlocked = true;
+            const awaitingRelease = outcome.kind === 'wait' && outcome.scope === 'release';
+            if (awaitingRelease) {
+              const key = releaseKey(task);
+              releaseBlocked.add(key);
+              if (fromOpeningRooms) {
+                const probes = (openingReleaseProbes.get(key) ?? 0) + 1;
+                openingReleaseProbes.set(key, probes);
+                // One extra first-choice POST may bridge Date/app-clock skew.
+                // If still closed, probe with read-only queries instead of
+                // repeatedly submitting every cached slot/court.
+                if (probes >= 2 || Date.now() >= releaseFastUntil) {
+                  for (const other of tasks) if (releaseKey(other) === key) retireOpeningRooms(other, true);
+                }
+              }
+            }
+            if (fromOpeningRooms && outcome.kind !== 'success' && !awaitingRelease) retireOpeningRooms(task, true);
             if (outcome.kind === 'success') {
               metrics.successes++; wins.get(task.target).add(task.time);
               quota.seed(quotaKey(task), task.time, { room, response });
@@ -593,7 +620,12 @@ export async function runBooking({ api, client, config, targets, date, immediate
           conflicts.add(task.key); task.lastMessage = response.msg; return;
         }
         if (['GOAL_REACHED', 'LOCAL_COOLDOWN'].includes(response.code)) return;
-        if (response.code === 'LOCAL_REFRESH_REQUIRED') { retireFixedRoom(task); task.needsRefresh = true; return; }
+        if (response.code === 'LOCAL_REFRESH_REQUIRED') {
+          // No POST was sent. The fresh view may legitimately select this same
+          // court again within the current round.
+          task.attemptedRooms.delete(room.WID);
+          retireOpeningRooms(task, true); task.needsRefresh = true; return;
+        }
         const outcome = classifyBookingResponse(response);
         if (outcome.kind === 'limited') return;
         if (outcome.kind === 'expired' || (outcome.kind === 'deadline' && expire(task))) {
@@ -608,6 +640,12 @@ export async function runBooking({ api, client, config, targets, date, immediate
         // and its court priority; the account transport cools down before its
         // next dispatch instead of treating it as a permanent account failure.
         if (['rate', 'server'].includes(outcome.scope)) return;
+        if (fromOpeningRooms && outcome.kind !== 'success') {
+          // A cached structure is not an availability view. Refresh this slot
+          // immediately before trying another court; do not keep the old array.
+          if (!blockedForRelease(task)) task.lastOutcome = 'refresh_required';
+          return;
+        }
         // "Not open" may describe just this court. It must not hide the next
         // configured court or prevent the later slots from being attempted.
         if (outcome.kind === 'wait') {
@@ -638,28 +676,43 @@ export async function runBooking({ api, client, config, targets, date, immediate
         if (tasks.every(done)) break;
       }
       round++;
-      releaseBlocked = false;
+      releaseBlocked.clear();
       // Finish each query -> submit -> durable response chain in priority order.
       // Querying later candidates first would put a slow read ahead of a ready
       // POST in the transport queue. Countdown warmup still prepares both slots.
       for (const task of slotOrder(tasks)) {
-        if (releaseBlocked || pausedRound === round || Date.now() >= deadline) break;
+        if (pausedRound === round || Date.now() >= deadline) break;
+        if (blockedForRelease(task)) continue;
         await reuse(task);
         if (expire(task) || done(task)) continue;
-        if (!task.fixedRoom && (task.needsRefresh || !task.rooms.length || (!task.warmed && Date.now() - (task.lastRefresh ?? 0) >= 5000))) {
-          await loadRooms([task], { attemptReady: true });
+        if (task.openingRooms) {
+          const choice = candidateRooms(task);
+          // A previous slot may have won an unlisted fallback court. Preserve
+          // same-court priority by querying rather than guessing from the cache.
+          if (!choice.preferred && ((task.target.preferSameCourt && choice.neighbor) || choice.anchor)) retireOpeningRooms(task, true);
         }
-        if (!completed.has(task.key) && !releaseBlocked && pausedRound !== round) await attempt(task);
+        for (let pass = 0; pass < 2; pass++) {
+          if (!task.openingRooms && (task.needsRefresh || !task.rooms.length || (!task.warmed && Date.now() - (task.lastRefresh ?? 0) >= 5000))) {
+            await loadRooms([task], { attemptReady: true });
+          }
+          if (!completed.has(task.key) && !blockedForRelease(task) && pausedRound !== round) await attempt(task);
+          if (task.lastOutcome !== 'refresh_required' || done(task) || blockedForRelease(task) || pausedRound === round || Date.now() >= deadline) break;
+        }
       }
       if (tasks.some((task) => !done(task))) {
-        const refreshRequired = tasks.some(task => !done(task) && task.lastOutcome === 'refresh_required');
-        const waitingVacancy = pausedRound !== round && !releaseBlocked && !refreshRequired;
+        const refreshRequired = tasks.some(task => !done(task) && !blockedForRelease(task) && task.lastOutcome === 'refresh_required');
+        const waitingVacancy = pausedRound !== round && !releaseBlocked.size && !refreshRequired;
         if (refreshRequired) onState('booking', { activity: 'querying', retryAt: null, activityMessage: '正在重新查询可预约场地' });
         if (waitingVacancy) onState('booking', { activity: 'waiting_vacancy', retryAt: null,
           activityMessage: '暂无可预约空位，正在等待名额释放' });
         // Empty availability is not a frequency rejection. Use the user's
         // configured polling interval; only school feedback adds a cooldown.
-        const interval = refreshRequired ? 0 : scheduler.pollIntervalMs;
+        const openingRetryReady = pausedRound !== round && Date.now() < releaseFastUntil
+          && tasks.some(task => !done(task) && task.openingRooms && blockedForRelease(task)
+            && openingReleaseProbes.get(releaseKey(task)) === 1);
+        // The account gate supplies the start-to-start interval for the one
+        // bounded opening retry. Normal read polling keeps its response delay.
+        const interval = openingRetryReady || refreshRequired ? 0 : scheduler.pollIntervalMs;
         await sleep(Math.max(0, Math.min(deadline - Date.now(), interval
           + Math.floor(Math.random() * ((scheduler.pollJitterMs ?? 0) + 1)))), signal);
       }

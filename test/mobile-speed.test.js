@@ -74,6 +74,21 @@ function fixture(t, { onBook, onRooms, beforeNativeDispatch, rows = [], onWrite,
   return { runner, store, plan, device, calls, books, snapshots, maxActive: () => maxActive };
 }
 
+function countdownFixture(t, options = {}) {
+  const releaseAt = Date.parse('2026-10-14T12:30:00+08:00');
+  let prepared;
+  const f = fixture(t, { ...options, onWrite: async state => {
+    await options.onWrite?.(state);
+    const intents = Object.values(state.runs[0]?.pendingRequests ?? {});
+    if (!prepared && Date.now() < releaseAt && intents.length === 2) {
+      prepared = structuredClone(intents);
+      t.mock.timers.setTime(releaseAt + 1);
+    }
+  } });
+  t.mock.timers.setTime(releaseAt - 10000);
+  return { ...f, releaseAt, prepared: () => prepared };
+}
+
 for (const preferSameCourt of [false, true]) test(`生产同账号串行恢复：同场偏好=${preferSameCourt}`, { timeout: 3000 }, async t => {
   const first = deferred(), release = deferred();
   const f = fixture(t, { onBook: async (_call, n) => { if (n === 1) { first.resolve(); await release.promise; } return { code: '0' }; } });
@@ -318,6 +333,99 @@ test('缓存固定场地在放号前准备两段：到点不查目录、不补�
   assert.equal(run.status, 'success'); assert.equal(f.maxActive(), 1);
   assert.equal(f.calls.filter(c => c.endpoint === 'getOpeningRoom.do').length, 0);
   assert.deepEqual(f.books.map(c => c.requestId).sort(), prepared.sort());
+});
+
+for (const includeOtherCourts of [false, true]) test(`倒计时多场地按配置顺序直提，缓存反序和旧满员不影响首选；允许其余=${includeOtherCourts}`, async t => {
+  const f = countdownFixture(t);
+  cacheCourt(f, ['C4', 'C6'].map(id => ({ ...knownCourt, WID: id, CDMC: id, disabled: true, text: '旧日期已满' })));
+  const run = await f.runner.start([{ ...f.plan, courts: ['C6', 'C4'], includeOtherCourts, durationMs: 10000 }], 'release');
+  assert.equal(run.status, 'success'); assert.equal(f.maxActive(), 1);
+  assert.equal(f.calls.filter(c => c.endpoint === 'getOpeningRoom.do').length, 0);
+  assert.deepEqual(f.books.map(c => [c.form.KYYSJD, c.form.CDWID]), [['12:00-13:00', 'C6'], ['13:00-14:00', 'C6']]);
+  assert.ok(f.books.every(c => c.at >= f.releaseAt && c.deadlineMs === run.items[0].releaseAt + 2000));
+  assert.ok(f.books[1].startedAt >= f.books[0].endedAt);
+  assert.deepEqual(f.books.map(c => c.requestId), f.prepared().map(r => r.requestId), '两段复用放号前已落盘的对应意图');
+  assert.deepEqual(pendingMobileRequests(run), []);
+});
+
+test('缓存首选已满后先查空位再换场，同场后段动态改为成功场地并重写意图', async t => {
+  const f = countdownFixture(t, { onBook: async call => call.form.CDWID === 'C6'
+    ? { code: '1', msg: '已满' } : { code: '0' } });
+  cacheCourt(f, ['C4', 'C6'].map(id => ({ ...knownCourt, WID: id, CDMC: id })));
+  const run = await f.runner.start([{ ...f.plan, courts: ['C6', 'C4'], preferSameCourt: true }], 'release');
+  assert.equal(run.status, 'success'); assert.equal(f.maxActive(), 1);
+  assert.deepEqual(f.books.map(c => [c.form.KYYSJD, c.form.CDWID]), [
+    ['12:00-13:00', 'C6'], ['12:00-13:00', 'C4'], ['13:00-14:00', 'C4'],
+  ]);
+  const relevant = f.calls.filter(c => ['getOpeningRoom.do', 'insertVenueBookingInfo.do'].includes(c.endpoint));
+  assert.deepEqual(relevant.map(c => c.endpoint), [
+    'insertVenueBookingInfo.do', 'getOpeningRoom.do', 'insertVenueBookingInfo.do', 'insertVenueBookingInfo.do',
+  ], '缓存只直提一次；实时目录仍列出 C6 时也不立即重复已经失败的请求');
+  assert.equal(relevant[1].form.KSSJ, '12:00', '只重查失败时段，后段仍可用缓存选择同场');
+  const original = f.prepared().find(r => r.time === '13:00-14:00'), second = f.books.at(-1);
+  assert.equal(original.courtId, 'C6'); assert.notEqual(second.requestId, original.requestId);
+  const snapshot = f.snapshots.find(state => state.runs[0].pendingRequests[second.requestId]);
+  assert.equal(snapshot.runs[0].pendingRequests[second.requestId].courtId, second.form.CDWID);
+  assert.deepEqual(pendingMobileRequests(run), []);
+});
+
+for (const invalid of ['incomplete', 'ambiguous']) test(`倒计时多场地缓存${invalid}时先查询，不跳过未知首选或猜同名场地`, async t => {
+  const f = countdownFixture(t);
+  const courts = invalid === 'incomplete' ? ['C6', 'C4'] : ['同名首选', 'C4'];
+  cacheCourt(f, invalid === 'incomplete'
+    ? [knownCourt]
+    : [{ ...knownCourt, CDMC: '同名首选' }, { ...knownCourt, WID: 'other-C6', CDMC: '同名首选' },
+      { ...knownCourt, WID: 'C4', CDMC: 'C4' }]);
+  const run = await f.runner.start([{ ...f.plan, courts }], 'release');
+  assert.equal(run.status, 'success'); assert.equal(f.maxActive(), 1);
+  const queries = f.calls.filter(c => c.endpoint === 'getOpeningRoom.do');
+  assert.equal(queries.length, 2);
+  assert.ok(f.calls.indexOf(queries[0]) < f.calls.indexOf(f.books[0]), '失效缓存不能直接拼预约表单');
+  assert.ok(queries.every(c => c.at < f.releaseAt), '有准备时间时提前查询，而非等到放号才发现缓存不可用');
+  assert.ok(f.books.every(c => c.form.CDWID === (invalid === 'incomplete' ? 'C6' : 'C4')));
+});
+
+test('允许其他场地的首段回退到未缓存场地后，后段先查目录保持同场偏好', async t => {
+  const f = countdownFixture(t, { onBook: async call => call.form.CDWID === 'C2'
+    ? { code: '0' } : { code: '1', msg: '已满' },
+  onRooms: () => ['C6', 'C4', 'C2'].map(id => ({ ...knownCourt, WID: id, CDMC: id })) });
+  cacheCourt(f, ['C6', 'C4'].map(id => ({ ...knownCourt, WID: id, CDMC: id })));
+  const run = await f.runner.start([{ ...f.plan, courts: ['C6', 'C4'], includeOtherCourts: true, preferSameCourt: true }], 'release');
+  assert.equal(run.status, 'success'); assert.equal(f.maxActive(), 1);
+  assert.deepEqual(f.books.map(c => [c.form.KYYSJD, c.form.CDWID]), [
+    ['12:00-13:00', 'C6'], ['12:00-13:00', 'C4'], ['12:00-13:00', 'C2'], ['13:00-14:00', 'C2'],
+  ]);
+  assert.deepEqual(f.calls.filter(c => c.endpoint === 'getOpeningRoom.do').map(c => c.form.KSSJ), ['12:00', '13:00']);
+  const secondQuery = f.calls.find(c => c.endpoint === 'getOpeningRoom.do' && c.form.KSSJ === '13:00');
+  assert.ok(f.calls.indexOf(secondQuery) > f.calls.indexOf(f.books[2]));
+  assert.ok(f.calls.indexOf(secondQuery) < f.calls.indexOf(f.books[3]), '未缓存的同场优先于原配置第一项');
+  assert.deepEqual(pendingMobileRequests(run), []);
+});
+
+test('倒计时多场地缓存遇到过频先退避再查询，保留原首选且不盲扫备选', { timeout: 3000 }, async t => {
+  const f = countdownFixture(t, { rateLimitBackoffMs: 20, onBook: async (_call, n) => n === 1
+    ? { code: '#E111080000000', msg: '操作过于频繁，请稍后再试！' } : { code: '0' } });
+  cacheCourt(f, ['C6', 'C4'].map(id => ({ ...knownCourt, WID: id, CDMC: id })));
+  const run = await f.runner.start([{ ...f.plan, courts: ['C6', 'C4'] }], 'release');
+  assert.equal(run.status, 'success'); assert.equal(f.maxActive(), 1);
+  assert.deepEqual(f.books.map(c => [c.form.KYYSJD, c.form.CDWID]), [
+    ['12:00-13:00', 'C6'], ['12:00-13:00', 'C6'], ['13:00-14:00', 'C6'],
+  ]);
+  const queries = f.calls.filter(c => c.endpoint === 'getOpeningRoom.do');
+  assert.equal(queries.length, 1);
+  assert.ok(queries[0].startedAt - f.books[0].endedAt >= 10, '实时刷新也不能抢在账号冷却结束前发送');
+  assert.deepEqual(pendingMobileRequests(run), []);
+});
+
+test('倒计时多场地缓存首单响应未知时保留唯一待核对请求，不查空位或发送备选', async t => {
+  const f = countdownFixture(t, { onBook: async () => { throw new Error('已发送，响应连接中断'); } });
+  cacheCourt(f, ['C6', 'C4'].map(id => ({ ...knownCourt, WID: id, CDMC: id })));
+  const run = await f.runner.start([{ ...f.plan, courts: ['C6', 'C4'] }], 'release');
+  assert.equal(run.status, 'error'); assert.equal(f.books.length, 1); assert.equal(f.books[0].form.CDWID, 'C6');
+  assert.equal(f.calls.filter(c => c.endpoint === 'getOpeningRoom.do').length, 0);
+  assert.equal(run.items[0].metrics.unknown, 1);
+  assert.equal(pendingMobileRequests(run).length, 1);
+  assert.equal(pendingMobileRequests(run)[0].courtId, 'C6');
 });
 
 for (const vacancy of [true, false]) test(`固定缓存首段响应跨过快速窗口：第二段重新查询，空位=${vacancy}`, { timeout: 4000 }, async t => {

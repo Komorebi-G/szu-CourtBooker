@@ -101,7 +101,7 @@ async function saveCourtStructure(f) {
     } } });
 }
 
-test('真实 HTTP：桌面固定场地倒计时使用已保存结构，到点无需等待空位查询', { timeout: 8000 }, async t => {
+test('真实 HTTP：历史有场地但目标日期不存在，倒计时只查目录、零预约请求', { timeout: 8000 }, async t => {
   const f = await laboratory(t, { rooms: () => [] });
   await saveCourtStructure(f);
   const job = await f.job(), saved = await readJson(join(job.dir, 'job.json'));
@@ -109,9 +109,9 @@ test('真实 HTTP：桌面固定场地倒计时使用已保存结构，到点无
   await writeJson(join(job.dir, 'job.json'), saved);
   await f.live.start(job.dir);
   const state = await f.store.get(job.id);
-  assert.equal(state.status, 'success', state.error);
-  assert.equal(f.roomReads.length, 0, '固定场地结构只为倒计时首单省去查询');
-  assert.deepEqual(f.submissions.map(form => [form.CDWID, form.KYYSJD, form.YYRGH]), [['court', '19:00-20:00', 'A']]);
+  assert.notEqual(state.status, 'success');
+  assert.ok(f.roomReads.length > 0, '本次执行必须查询目标日期与时段');
+  assert.equal(f.submissions.length, 0, '历史编号不能作为目标日期可用的证据');
   assert.equal(f.bookingReads[0].pageSize, '500', '临近放号以已支持的大分页减少准备请求');
 });
 

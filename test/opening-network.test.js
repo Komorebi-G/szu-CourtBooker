@@ -24,7 +24,7 @@ async function fixture(t, { skewMs = 0, waitDelay = () => 20, queryDelayMs = 30,
     let body = ''; for await (const chunk of req) body += chunk;
     const form = Object.fromEntries(new URLSearchParams(body));
     const endpoint = new URL(req.url, 'http://local').pathname.split('/').at(-1);
-    const record = { endpoint, form, at: performance.now() }; trace.push(record);
+    const record = { endpoint, form, at: performance.now(), localAt: Date.now() }; trace.push(record);
     let data;
     if (endpoint === 'index.do') data = "USERID='local-user';USER_INFO={\"userName\":\"测试\"};APP_TITLE=";
     else if (endpoint === 'getOpeningRoom.do') {
@@ -33,6 +33,7 @@ async function fixture(t, { skewMs = 0, waitDelay = () => 20, queryDelayMs = 30,
         ? { code: '#E111080000000', msg: '该预约日期暂未开放预约' }
         : { code: '0', datas: { getOpeningRoom: { rows: [room('A'), room('B')].map(r => ({ ...r, XMDM: form.XMDM, disabled: queryDisabled })) } } };
       if (++roomQueries === queryLimit) t.mock.timers.setTime(releaseAt + 6001);
+      else if (queryDisabled && roomQueries === 2) t.mock.timers.setTime(releaseAt + 1);
     } else if (endpoint === 'insertVenueBookingInfo.do') {
       firstPostAt ??= record.at;
       maximum = Math.max(maximum, ++active);
@@ -64,8 +65,7 @@ async function fixture(t, { skewMs = 0, waitDelay = () => 20, queryDelayMs = 30,
   const targets = multipleSports ? [target, { ...target, targetIndex: 1, sportCode: '002' }] : [target];
   let intents = 0;
   const run = () => runBooking({ api, client, targets, date: '2026-10-24', immediate: false, live: true,
-    releaseAtServer: releaseAt, log() {}, knownRooms: [room('A'), room('B'),
-      ...(multipleSports ? [room('A'), room('B')].map(r => ({ ...r, WID: 'other-' + r.WID, XMDM: '002' })) : [])],
+    releaseAtServer: releaseAt, log() {},
     config: { scheduler: { timeoutMs: 6000, pollIntervalMs: 80, pollJitterMs: 0, queryConcurrency: 1 }, booking: {} },
     onPreparedAttempt: async () => { if (++intents === 2) t.mock.timers.setTime(releaseAt + 1); } });
   return { run, trace, dispatches, maximum: () => maximum, firstPostAt: () => firstPostAt };
@@ -81,15 +81,15 @@ for (const skewMs of [60, 220, 900]) test(`真实HTTP：应用比校时晚开闸
   }
   const posts = f.trace.filter(r => r.endpoint === 'insertVenueBookingInfo.do');
   const early = posts.filter(r => r.at < f.firstPostAt() + skewMs);
-  assert.ok(early.length <= 2, '整日未开放期间最多两次缓存POST，其后只读探测');
+  assert.ok(early.length <= 2, '已预读目标目录后，整日未开放期间最多两次POST，其后只读探测');
   assert.ok(early.every(r => r.form.KYYSJD === '19:00-20:00' && r.form.CDWID === 'A'));
   for (let i = 1; i < posts.length; i++) {
     assert.ok(posts[i].at >= posts[i - 1].completedAt, '前一单完整响应后才提交');
     assert.ok(f.dispatches[i] - f.dispatches[i - 1] >= 79,
       `客户端起始间隔应满足80ms（1ms定时精度容差），实测${f.dispatches[i] - f.dispatches[i - 1]}ms`);
   }
-  const queries = f.trace.filter(r => r.endpoint === 'getOpeningRoom.do');
-  if (skewMs === 60) assert.equal(queries.length, 0, '一次额外探测已开闸，无需插入GET');
+  const queries = f.trace.filter(r => r.localAt >= releaseAt && r.endpoint === 'getOpeningRoom.do');
+  if (skewMs === 60) assert.equal(queries.length, 0, '目标目录已在放号前预读，一次额外探测开闸后不补查');
   else assert.ok(queries.length >= 1, '第二次仍未开放后转只读等待');
   assert.ok(queries.filter(r => r.at + 30 < f.firstPostAt() + skewMs).every(r => r.form.KSSJ === '19:00'),
     '日期未开放的查询不再重复探测后段');
@@ -99,11 +99,12 @@ for (const skewMs of [60, 220, 900]) test(`真实HTTP：应用比校时晚开闸
 test('真实HTTP：缓存满员后目录仍全满，正常间隔查询而非零等待自旋', async t => {
   const f = await fixture(t, { firstMessage: '场地满员', queryDisabled: true, queryLimit: 5 });
   const result = await f.run(); assert.equal(result.successes.length, 0);
+  assert.equal(f.trace.filter(r => r.endpoint === 'insertVenueBookingInfo.do').length, 0, '历史场地不可作为满员目标的提交依据');
   const queries = f.trace.filter(r => r.endpoint === 'getOpeningRoom.do');
   assert.equal(queries.length, 5);
   // Two slots may be read in the same round. Re-reading the same slot must
   // include the polling wait as well as completed HTTP responses.
-  const firstSlot = queries.filter(r => r.form.KSSJ === '19:00');
+  const firstSlot = queries.filter(r => r.localAt >= releaseAt && r.form.KSSJ === '19:00');
   for (let i = 1; i < firstSlot.length; i++) assert.ok(firstSlot[i].at - firstSlot[i - 1].at >= 100,
     `空位查询不能残留refresh_required而空转，实测${firstSlot[i].at - firstSlot[i - 1].at}ms`);
 });
@@ -119,7 +120,7 @@ test('真实HTTP：某项目未开闸不挡住同账号已开放项目，也不�
 for (const message of ['该场地未开放', '场地满员']) test(`真实HTTP：相同业务码返回“${message}”时重新查询空位，不按日期未开放重发首选`, async t => {
   const f = await fixture(t, { firstMessage: message });
   const result = await f.run(); assert.equal(result.ok, true);
-  const actions = f.trace.filter(r => ['insertVenueBookingInfo.do', 'getOpeningRoom.do'].includes(r.endpoint));
+  const actions = f.trace.filter(r => r.localAt >= releaseAt && ['insertVenueBookingInfo.do', 'getOpeningRoom.do'].includes(r.endpoint));
   assert.deepEqual(actions.slice(0, 3).map(r => [r.endpoint, r.form.CDWID]),
     [['insertVenueBookingInfo.do', 'A'], ['getOpeningRoom.do', undefined], ['insertVenueBookingInfo.do', 'B']]);
 });

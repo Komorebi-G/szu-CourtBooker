@@ -31,7 +31,7 @@ export class LiveExecution {
   closing = false;
   failures = new Map();
   startSequence = 0;
-  constructor({ dataDir, createApi, renewSession, referenceReader, cachedRoomsReader } = {}) {
+  constructor({ dataDir, createApi, renewSession, referenceReader } = {}) {
     this.createApi = createApi ?? (async (path, _signal, expectedUserId) => {
       const client = await HttpClient.create({ sessionPath: path, expectedUserId, renewSession, priority: 'critical' });
       return { client, api: new SzuVenueApi(client) };
@@ -39,7 +39,6 @@ export class LiveExecution {
     this.dataDir = dataDir;
     const catalogs = dataDir ? new ReferenceCatalogStore(dataDir) : null;
     this.referenceReader = referenceReader ?? (catalogs ? (input) => catalogs.read(input) : undefined);
-    this.cachedRoomsReader = cachedRoomsReader ?? (catalogs ? (input) => catalogs.cachedRooms(input) : undefined);
   }
   createQuota() {
     return new BookingQuota({ onAccountStop: (account, message) => {
@@ -109,7 +108,6 @@ export class LiveExecution {
     const work = executeJob(dir, { manualStart: true, stopSignal: controller.signal, quota: this.quota,
       createApi: this.createApi,
       referenceReader: this.referenceReader,
-      cachedRoomsReader: this.cachedRoomsReader,
       onFatal: (error) => this.halt(error),
       onIdentity: (account) => {
         const entry = this.active.get(dir);

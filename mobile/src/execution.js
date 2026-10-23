@@ -255,7 +255,6 @@ export class ForegroundExecution {
           }));
           const result = await runBooking({ api: wrapper, client, config, targets, date: plan.date,
             quota, quotaAccount: userId,
-            knownRooms: this.store.state.catalogs[`${plan.accountId}:${plan.project}`]?.rooms ?? [],
             loadSchoolBookings: (options) => api.getAllBookings({ ...options, pageSize: 500 }),
             immediate: intents.get(plan.id).mode === 'now',
             releaseAtServer: intents.get(plan.id).mode === 'release' ? intents.get(plan.id).releaseAt : undefined,

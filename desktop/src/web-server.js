@@ -200,7 +200,8 @@ async function projectCatalog(projectId, dateValue, accountId, signal) {
     const reference = await catalogs.read({ api, target, accountId,
       dates: referenceDates(resolveDate(dateValue ?? 'today')), times: [], signal, deadline });
     return { date: reference.date, dates: reference.dates, cached: reference.cached, partial: reference.partial,
-      issues: reference.issues, preference: config.courtPreferences?.[projectId] ?? ['*'],
+      issues: reference.issues, views: reference.views, history: reference.history,
+      preference: config.courtPreferences?.[projectId] ?? ['*'],
       times: reference.times.map((value) => ({ value })), courts: reference.courts };
   } finally { await client.flush(); }
 }

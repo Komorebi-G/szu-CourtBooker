@@ -182,6 +182,12 @@ fieldset details { font-size: 13px; color: var(--muted); margin-top: 8px; }
 .court-card.selected .court-order { background: var(--green); color: white; }
 .court-name { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
 .court-venue { display: block; font-size: 12px; color: var(--muted); }
+.court-availability { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); }
+.court-availability.available { color: var(--success); }
+.court-availability.unavailable, .court-availability.missing { color: var(--red); }
+.manual-court { display: flex; align-items: center; gap: 8px; }
+.manual-court input { flex: 1; }
+.manual-court button { flex: none; }
 .court-sequence { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-height: 25px; font-size: 13px; color: var(--ink); }
 .order-chip { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; max-width: 100%; border: 1px solid var(--line); background: var(--soft); border-radius: 4px; padding: 3px 7px; }
 .order-chip button { width: 36px; min-height: 40px; border: 1px solid var(--line); background: white; color: var(--ink); font-size: 17px; padding: 3px; }

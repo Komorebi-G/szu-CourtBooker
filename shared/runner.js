@@ -130,7 +130,7 @@ export async function waitForRelease({ api, scheduler, immediate, log, signal, r
 export async function runBooking({ api, client, config, targets, date, immediate, live, log,
   signal, releaseAtServer, onState = () => {}, onSuccess = async () => {}, initialSuccesses = [],
   resetDurationOnStart = false, latestStartAt = Infinity, quota = new BookingQuota(), quotaAccount = 'current',
-  loadSchoolBookings, readReference = readReferenceCatalog, onPreparedAttempt = async () => {}, knownRooms = [] }) {
+  loadSchoolBookings, readReference = readReferenceCatalog, onPreparedAttempt = async () => {} }) {
   const { scheduler } = config;
   let serverOffsetMs = 0;
   let clockReady = typeof api.sampleServerClock !== 'function';
@@ -250,32 +250,13 @@ export async function runBooking({ api, client, config, targets, date, immediate
       target, date, time, timeIndex, rooms: [], key: `${target.targetIndex}|${date}|${time}`,
     })));
     tasks = batches.flat(); total = tasks.length;
-    if (live && !immediate && Array.isArray(knownRooms)) for (const task of tasks) {
-      const target = task.target;
-      if (!target.courtNames?.length) continue;
-      const fields = ['WID', 'CDMC', 'CGBM', 'CQBM', 'XMDM', 'XQDM'];
-      const rooms = target.courtNames.map(selected => {
-        const matches = knownRooms.filter(room => room && ['WID', 'CDMC', 'CGBM', 'XMDM', 'XQDM']
-          .every(field => typeof room[field] === 'string' && room[field].trim())
-          && (room.WID === selected || room.CDMC === selected)
-          && room.XMDM === target.sportCode && room.XQDM === target.campusCode
-          && target.venues.some(venue => venue.CGBM === room.CGBM))
-          .map(room => Object.fromEntries(fields.filter(field => room[field] !== undefined).map(field => [field, room[field]])));
-        const unique = [...new Map(matches.map(room => [JSON.stringify(room), room])).values()];
-        return unique.length === 1 ? unique[0] : null;
-      });
-      if (rooms.some(room => !room)) continue;
-      // Only a countdown's first dispatch may use structural cache to avoid a
-      // query at release. Keep preference order for the next slot's same-court
-      // choice, but never sweep this structural list after a rejected POST.
-      task.openingRooms = [...new Map(rooms.map(room => [room.WID, room])).values()];
-      task.rooms = task.openingRooms; task.warmed = true;
-    }
+    // Historical structure and manually saved names identify preferences only.
+    // A first POST must come from this execution's target-date/slot query.
     if (!total) throw new Error('没有可执行的预约时段');
     if (live) for (const key of new Set(tasks.map(quotaKey))) closeScopes.push(quota.open(key));
     log('PLAN', '本次执行规则：候选时段、场地顺序与同场偏好', {
       event: 'execution_plan', date, live, immediate, parallelSlots: false,
-      fixedCourtSlots: tasks.filter(task => task.openingRooms).length,
+      requiresTargetDateQuery: true,
       targets: targets.map((t) => ({ name: t.name, times: [...new Set(t.times)].sort(),
         courts: t.courtNames, bookingGoal: bookingGoal(t), preferSameCourt: Boolean(t.preferSameCourt), includeOtherCourts: Boolean(t.includeOtherCourts) })),
       pollIntervalMs: scheduler.pollIntervalMs, timeoutMs: scheduler.timeoutMs,
@@ -445,6 +426,7 @@ export async function runBooking({ api, client, config, targets, date, immediate
           }
           task.lastRefresh = Date.now();
           task.warmed = Boolean(warmupUntil && rooms.length);
+          if (warmupUntil && rooms.some(room => !room.disabled)) task.openingRooms = rooms;
         }
       } catch (error) {
         if (!signal?.aborted && error.code === 'REQUEST_NOT_SENT' && Date.now() >= deadline) return;

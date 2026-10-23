@@ -1,4 +1,4 @@
-import { installMenus, planExperience, pendingExecutionRequests, visiblePlans, repeatPlan, friendlyDate, selectionSummary, selectedBookingGoal, bookingTitle } from '/experience.js';
+import { installMenus, planExperience, pendingExecutionRequests, visiblePlans, repeatPlan, friendlyDate, selectionSummary, selectedBookingGoal, bookingTitle, referenceCourtStatus, referenceCatalogHint } from '/experience.js';
 installMenus();
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -274,6 +274,7 @@ $('#bookingGoal').addEventListener('change', () => { model.customGoal = true; mo
 function renderTimes() {
   updateSelectionSummary();
   $('#timeOptions').innerHTML = model.options.map((time) => `<button type="button" class="time-option ${model.times.includes(time) ? 'selected' : ''}" data-time="${escape(time)}" aria-pressed="${model.times.includes(time)}">${escape(time)}</button>`).join('');
+  renderCourts();
 }
 function renderCourts() {
   updateSelectionSummary();
@@ -283,17 +284,24 @@ function renderCourts() {
   $('#courtSequence').innerHTML = all ? '全部场地 · 按学校返回的顺序尝试' : model.order.length
     ? model.order.map((id, i) => `<span class="order-chip"><b>${i + 1}</b>${escape(model.courtLabels[id] || id)}<button type="button" data-move="${i}" data-step="-1" aria-label="上移 ${escape(model.courtLabels[id] || id)}" ${i === 0 ? 'disabled' : ''}>↑</button><button type="button" data-move="${i}" data-step="1" aria-label="下移 ${escape(model.courtLabels[id] || id)}" ${i === model.order.length - 1 ? 'disabled' : ''}>↓</button></span>`).join('<span aria-hidden="true">→</span>')
     : '<span class="muted">尚未选择场地</span>';
-  $('#courtList').innerHTML = model.courts.map((court) => {
+  const courts = [...model.courts];
+  for (const id of model.order.filter(id => id !== '*')) if (!courts.some(court => court.id === id)) {
+    const name = model.courtLabels[id] ?? id;
+    courts.push({ id, name, pendingName: id === name });
+  }
+  $('#courtList').innerHTML = courts.map((court) => {
     const index = all ? -1 : model.order.indexOf(court.id);
-    return `<button type="button" class="court-card ${index >= 0 ? 'selected' : ''}" data-court="${escape(court.id)}" aria-pressed="${index >= 0}" aria-label="${escape(court.name)}${index >= 0 ? `，第 ${index + 1} 优先` : ''}"><span class="court-order">${index >= 0 ? index + 1 : '+'}</span><span class="court-name">${escape(court.name)}<span class="court-venue">${escape(court.venue)}</span></span></button>`;
+    const status = referenceCourtStatus(model.catalog, court, $('#taskDate').value, model.times);
+    return `<button type="button" class="court-card ${index >= 0 ? 'selected' : ''}" data-court="${escape(court.id)}" aria-pressed="${index >= 0}" aria-label="${escape(court.name)}${index >= 0 ? `，第 ${index + 1} 优先` : ''}"><span class="court-order">${index >= 0 ? index + 1 : '+'}</span><span class="court-name">${escape(court.name)}<span class="court-venue">${escape(court.venue)}</span><span class="court-availability ${status.state}">${escape(status.label)}</span>${status.hint !== '' ? `<span class="court-venue" title="${escape(status.detail)}">${escape(status.hint ?? status.detail)}</span>` : ''}</span></button>`;
   }).join('');
+  $('#courtNote').textContent = referenceCatalogHint(model.catalog ? { ...model.catalog, courts } : null, $('#taskDate').value, model.times);
 }
 async function loadProject(task) {
   const token = ++model.token;
   model.catalogController?.abort(); model.catalogController = new AbortController();
   const id = $('#taskProject').value;
   model.times = [...(task?.times ?? [])]; model.options = [...model.times];
-  model.order = [...(task?.courts ?? ['*'])]; model.courts = [];
+  model.order = [...(task?.courts ?? ['*'])]; model.courts = []; model.catalog = null;
   model.courtLabels = { ...(task?.courtLabels ?? {}) };
   $('#preferSameCourt').checked = task?.preferSameCourt ?? id === 'volleyball';
   $('#includeOtherCourts').checked = task?.includeOtherCourts ?? false;
@@ -313,6 +321,7 @@ async function loadProject(task) {
   $('#refreshCatalog').hidden = Boolean(catalog?.times.length);
   renderTimes();
   if (catalog) {
+    model.catalog = catalog;
     model.courts = catalog.courts;
     $('#courtNote').textContent = '';
     for (const court of model.courts) {
@@ -376,6 +385,15 @@ $('#courtList').addEventListener('click', (event) => {
   model.order = model.order.includes(id) ? model.order.filter((value) => value !== id) : [...model.order, id]; renderCourts();
 });
 $('#allCourts').addEventListener('click', () => { model.order = ['*']; renderCourts(); });
+$('#addCourtButton').addEventListener('click', () => {
+  const name = $('#manualCourtName').value.trim();
+  if (!name || name === '*') { $('#taskError').textContent = '请填写学校显示的场地完整名称'; return; }
+  const court = model.courts.find(court => court.name === name || court.id === name);
+  const id = court?.id ?? name;
+  model.courtLabels[id] = court?.name ?? name;
+  model.order = [...new Set([...model.order.filter(value => value !== '*'), id])];
+  $('#manualCourtName').value = ''; $('#taskError').textContent = ''; renderCourts();
+});
 $('#taskForm').addEventListener('submit', async (event) => {
   event.preventDefault(); if (model.busy) return;
   if (!model.times.length || !model.order.length) { $('#taskError').textContent = '至少选择一个时段和一个场地，或选择尝试全部场地'; return; }

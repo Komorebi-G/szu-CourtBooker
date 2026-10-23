@@ -43,11 +43,13 @@ export async function readCatalog(store, device, account, projectId, targetDate 
     // A refresh may finish after another refresh has saved new structure.
     const merged = mergeReferenceCatalogs([reference], { target, cached: store.state.catalogs[key] });
     const catalog = { date: reference.date, dates: reference.dates, times: merged.times, courts: merged.courts,
+      views: merged.views, history: merged.history, issues: reference.issues,
       cached: reference.cached || merged.cached, partial: reference.partial,
       rooms: merged.rooms.map((room) => Object.fromEntries(['WID', 'CDMC', 'CGBM', 'CQBM', 'XMDM', 'XQDM']
         .filter((field) => room[field] !== undefined).map((field) => [field, room[field]]))) };
     signal?.throwIfAborted();
-    await store.update({ catalogs: { ...store.state.catalogs, [key]: catalog } });
+    const { views, ...saved } = catalog;
+    await store.update({ catalogs: { ...store.state.catalogs, [key]: saved } });
     return catalog;
   } finally { await client.flush(); }
 }

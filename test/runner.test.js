@@ -3,6 +3,7 @@ import test from 'node:test';
 import { runBooking } from '../shared/runner.js';
 import { addDays, shanghaiDate } from '../shared/utils.js';
 import { BookingQuota } from '../shared/booking-quota.js';
+import { SchoolQueryError } from '../shared/errors.js';
 
 test('共用执行器：首单结果未知后，共享名额队列内的同账号方案停止提交，其他账号仍可执行', async () => {
   const quota = new BookingQuota(), calls = [];
@@ -64,7 +65,27 @@ test('dry-run 验证执行计划但绝不调用下单接口', async (t) => {
   assert.equal(result.ok, true);
   assert.equal(result.rounds, 0);
   assert.equal(bookCalls, 0);
-  assert.deepEqual(catalogDates, ['2026-09-20']);
+  assert.deepEqual(catalogDates, ['2026-09-20', '2026-09-21']);
+});
+
+test('先按完整名称保存明天排球4号场：目录缺席和不可用时等待，查到真实编号后只提交4号场', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-23T13:00:00+08:00') });
+  const date = '2026-10-24', name = '4号排球场（包场）', bookings = []; let queries = 0;
+  const fourth = { WID: 'real-school-court-4', CDMC: name, CGBM: 'volley', XMDM: '002', XQDM: '1' };
+  const result = await runBooking({
+    api: { async getOpeningRooms(input) {
+      assert.equal(input.date, date); assert.equal(input.modeCode, '1.0'); queries++;
+      const other = { ...fourth, WID: 'court-1', CDMC: '1号排球场（包场）' };
+      return queries === 1 ? [other] : [other, { ...fourth, disabled: queries === 2 }];
+    }, async book(input) { bookings.push(input); return { code: '0', data: { DHID: 'order-4' } }; } },
+    client: { async flush() {} }, config: { scheduler: { pollIntervalMs: 1, timeoutMs: 1000 }, booking: {} },
+    targets: [{ name: '明天排球4号场', targetIndex: 0, campusCode: '1', sportCode: '002', modeCode: '1.0',
+      venues: [{ CGBM: 'volley', CGMC: '西馆排球场（包场）' }], courtNames: [name], times: ['19:00-20:00'] }],
+    date, immediate: true, live: true, log() {},
+  });
+  assert.equal(result.ok, true); assert.equal(result.successes.length, 1); assert.equal(queries, 3);
+  assert.equal(bookings.length, 1); assert.equal(bookings[0].date, date);
+  assert.equal(bookings[0].room.WID, fourth.WID); assert.equal(bookings[0].room.CDMC, name);
 });
 
 test('正式运行按查询中的可用场地顺序预约', async () => {
@@ -164,7 +185,8 @@ test('首个候选时段无场地时，继续用后续时段读取场地目录',
     date: '2026-09-20', immediate: true, live: false, log() {},
   });
   assert.equal(result.ok, true);
-  assert.deepEqual(queried, [['2026-09-20', '19:00-20:00'], ['2026-09-20', '20:00-21:00']]);
+  assert.deepEqual(queried, [['2026-09-20', '19:00-20:00'], ['2026-09-20', '20:00-21:00'],
+    ['2026-09-21', '19:00-20:00'], ['2026-09-21', '20:00-21:00']]);
   assert.deepEqual(result.executionTasks.map((task) => task.rooms[0].WID), ['court-1', 'court-1']);
 });
 
@@ -175,10 +197,14 @@ test('目标日期未放号时，检查配置可用今天其他开放时段识�
     api: {
       async getOpeningRooms({ date, time }) {
         queried.push([date, time]);
+        if (date !== today) throw new SchoolQueryError({ kind: 'wait', scope: 'release', message: '该预约日期暂未开放预约' });
         return time === '14:00-15:00'
           ? [{ WID: 'court-1', CGBM: 'venue-1', CDMC: '1号场' }] : [];
       },
-      async getTimeList({ date }) { assert.equal(date, today); return [{ CODE: '14:00-15:00' }]; },
+      async getTimeList({ date }) {
+        if (date !== today) throw new SchoolQueryError({ kind: 'wait', scope: 'release', message: '该预约日期暂未开放预约' });
+        return [{ CODE: '14:00-15:00' }];
+      },
     },
     client: { async flush() {} },
     config: { scheduler: { queryConcurrency: 1 }, booking: {} },
@@ -187,5 +213,6 @@ test('目标日期未放号时，检查配置可用今天其他开放时段识�
     date: targetDate, immediate: true, live: false, log() {},
   });
   assert.equal(result.ok, true);
-  assert.deepEqual(queried, [[today, '08:00-09:00'], [today, '14:00-15:00']]);
+  assert.deepEqual(queried, [[targetDate, '08:00-09:00'], [today, '08:00-09:00'],
+    [today, '14:00-15:00'], [addDays(today, 1), '08:00-09:00']]);
 });

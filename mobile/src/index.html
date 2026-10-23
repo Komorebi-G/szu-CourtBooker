@@ -45,7 +45,9 @@
     <div id="planSchedule" class="schedule-preview"></div>
     <fieldset><legend>时段</legend><p class="field-help">最多预约两个时段</p><div id="times" class="time-options"></div></fieldset>
     <div class="catalog-status"><p id="catalogNote" class="field-help" role="status"></p><button id="loadCatalog" type="button" class="secondary" hidden>重新加载</button></div>
-    <fieldset><legend>场地</legend><button id="allCourts" type="button" class="time-option">不限场地</button><div id="courts" class="court-list"></div></fieldset>
+    <fieldset><legend>场地</legend><button id="allCourts" type="button" class="time-option">不限场地</button><div id="courts" class="court-list"></div><p id="courtNote" class="field-help" role="status"></p>
+      <details class="unlisted-court"><summary>找不到场地？按完整名称添加</summary><p class="field-help">适用于未放号或目录暂未返回的场地。执行时查询目标日期，找到同名场地后才尝试。</p><div class="manual-court"><input id="manualCourtName" maxlength="100" aria-label="学校场地完整名称" placeholder="例如：4号排球场（包场）"><button id="addCourtButton" type="button" class="secondary">加入选择</button></div></details>
+    </fieldset>
     <details id="planOptions" class="advanced"><summary>更多设置（可跳过）</summary>
       <label>预约备注 <span class="optional">选填</span><input id="planName" maxlength="60" placeholder="留空自动命名"></label>
       <label>预约目标<select id="bookingGoal"><option value="one">任选一段</option><option value="consecutive">连续两段</option><option value="two">任意两段</option></select></label><p id="bookingGoalHint" class="field-help" hidden>可能只约到一段，已约场地保留。</p>

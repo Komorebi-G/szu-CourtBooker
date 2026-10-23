@@ -38,7 +38,7 @@ export async function executeJob(dir, options = {}) {
   }
 }
 
-async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = false, stopSignal, referenceReader, cachedRoomsReader,
+async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = false, stopSignal, referenceReader,
   submit = (operation) => operation(), onFatal = () => {}, onIdentity = () => {}, createApi = async (path) => {
   const client = await HttpClient.create({ sessionPath: path });
   return { client, api: new SzuVenueApi(client) };
@@ -116,16 +116,6 @@ async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = 
     const metadata = await api.getSportVenueData({ signal });
     signal.throwIfAborted();
     const targets = resolveTargets(job.config, metadata);
-    let knownRooms = [];
-    if (job.mode === 'release' && cachedRoomsReader) {
-      try {
-        knownRooms = (await Promise.all(targets.map(target => cachedRoomsReader({ target,
-          accountId: job.accountId ?? 'default' })))).flat();
-      } catch (error) {
-        log('WARN', '已保存的场地结构暂不可读，改用实时查询', { message: error.message });
-      }
-      signal.throwIfAborted();
-    }
     state.quotaScope = { account,
       sport: targets[0].sportCode, date: job.config.targets[0].date };
     // Compare every POST field: a refreshed catalog or a changed candidate
@@ -214,7 +204,7 @@ async function executeOwnedJob(dir, { quota = new BookingQuota(), manualStart = 
     const result = await runBooking({ api: wrapper, client, config: job.config, targets,
       date: job.config.targets[0].date, immediate: job.mode === 'now', live: job.mode !== 'check',
       releaseAtServer: job.mode === 'release' ? job.releaseAt : undefined, signal, log,
-      onPreparedAttempt, knownRooms,
+      onPreparedAttempt,
       resetDurationOnStart: job.mode === 'now',
       quota, quotaAccount: account,
       loadSchoolBookings: (options) => api.getAllBookings({ ...options, pageSize: 500 }),

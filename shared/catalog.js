@@ -1,6 +1,6 @@
 import { roomsToTasks, compareTasks } from './planner.js';
 import { RequestNotSentError, isTransientQueryError } from './errors.js';
-import { splitTimeSlot, shanghaiDate, addDays, releaseEpoch } from './utils.js';
+import { splitTimeSlot, shanghaiDate, addDays } from './utils.js';
 
 function check(signal, deadline) {
   signal?.throwIfAborted();
@@ -11,7 +11,7 @@ function check(signal, deadline) {
 // Merge all requested slots before applying preference order.
 export async function readCourtCatalog({ api, target, date, times = target.times ?? [],
   discoverTimes = false, signal, deadline = Infinity, tolerateUnavailable = false,
-  partialOnDeadline = false, timeoutMs, onQuery = () => {}, onRooms, onWait, onRateLimit = () => {}, onReleaseWait }) {
+  partialOnDeadline = false, recordViews = false, timeoutMs, onQuery = () => {}, onRooms, onWait, onRateLimit = () => {}, onReleaseWait }) {
   const queries = new Set(times);
   const listedTimes = [];
   const issues = [];
@@ -39,7 +39,7 @@ export async function readCourtCatalog({ api, target, date, times = target.times
       listedTimes.push(row.CODE); queries.add(row.CODE);
     }
   }
-  const found = new Map();
+  const found = new Map(), views = [];
   const slotRooms = new Map([...queries].map((time) => [time, new Map()]));
   const rank = (task) => {
     const index = target.courtNames?.findIndex((value) => value === task.room.WID || value === task.room.CDMC) ?? 0;
@@ -84,6 +84,14 @@ export async function readCourtCatalog({ api, target, date, times = target.times
       onQuery({ time, venue: venue.CGBM, durationMs: Date.now() - startedAt,
         outcome: rooms.length ? 'rooms' : 'empty', count: rooms.length,
         available: rooms.filter(room => !room.disabled).length, unavailable: rooms.filter(room => room.disabled).length });
+      // Dated query evidence is for editor hints only; it never establishes
+      // availability for another date or for a subsequent booking attempt.
+      if (recordViews) {
+        const matching = rooms.filter(room => room.CGBM === venue.CGBM);
+        views.push({ date, time, venueCode: venue.CGBM, checkedAt: Date.now(),
+          available: matching.filter(room => !room.disabled).map(room => room.WID),
+          unavailable: matching.filter(room => room.disabled).map(room => room.WID) });
+      }
       const group = { target, date, time, timeIndex: 0, venue, venueIndex };
       for (const task of roomsToTasks(group, rooms).sort(compareTasks)) {
         if (!found.has(task.room.WID)) found.set(task.room.WID, task);
@@ -95,7 +103,7 @@ export async function readCourtCatalog({ api, target, date, times = target.times
   }
   const tasks = [...found.values()];
   tasks.sort((a, b) => rank(a) - rank(b));
-  return { date, times: [...new Set(listedTimes)].sort(), rooms: tasks.map((t) => t.room), issues,
+  return { date, times: [...new Set(listedTimes)].sort(), rooms: tasks.map((t) => t.room), issues, views,
     roomsByTime: Object.fromEntries([...slotRooms].map(([time, rooms]) =>
       [time, [...rooms.values()].sort((a, b) => rank(a) - rank(b)).map((task) => task.room)])),
     courts: tasks.map((t) => ({ id: t.room.WID, name: t.room.CDMC, venue: t.venue.CGMC,
@@ -136,8 +144,20 @@ export function mergeReferenceCatalogs(catalogs, { target, cached } = {}) {
   const sources = catalogs.filter((catalog) => catalog.rooms.length || catalog.times.length).map((catalog) => catalog.date);
   const primary = catalogs.find((catalog) => catalog.rooms.length) ?? catalogs.find((catalog) => catalog.times.length) ?? catalogs[0];
   const issues = catalogs.flatMap((catalog) => catalog.issues);
+  const views = catalogs.flatMap(catalog => catalog.views ?? []);
+  const history = new Map();
+  for (const view of [...(Array.isArray(cached?.history) ? cached.history : []), ...catalogs.flatMap(catalog => catalog.history ?? []), ...views]) {
+    if (!view || !/^\d{4}-\d{2}-\d{2}$/.test(view.date) || typeof view.venueCode !== 'string'
+      || !Number.isFinite(view.checkedAt) || !Array.isArray(view.available) || !Array.isArray(view.unavailable)) continue;
+    try { splitTimeSlot(view.time); } catch { continue; }
+    const key = JSON.stringify([view.date, view.time, view.venueCode]);
+    if (!history.has(key) || view.checkedAt >= history.get(key).checkedAt) history.set(key, view);
+  }
+  // Keep recent dated evidence bounded; the physical-court union is retained.
+  const recentDates = new Set([...new Set([...history.values()].map(view => view.date))].sort().slice(-32));
   return { date: sources.length ? primary.date : cached?.date ?? primary?.date, dates: [...new Set(sources)],
     times: [...times].sort(), rooms, courts, issues, partial: issues.length > 0,
+    views, history: [...history.values()].filter(view => recentDates.has(view.date)),
     cached: cachedIds.size > 0 || [...times].some((time) => !freshTimes.has(time)), reference: true };
 }
 
@@ -164,7 +184,7 @@ export async function readReferenceCatalog({ dates, cached, ...options }) {
   }
   const catalogs = [];
   for (const [index, date] of referenceDates.entries()) {
-    const catalog = await readCourtCatalog({ ...options, date, times: [...knownTimes].sort(), discoverTimes: false,
+    const catalog = await readCourtCatalog({ ...options, date, times: [...knownTimes].sort(), discoverTimes: false, recordViews: true,
       tolerateUnavailable: true, partialOnDeadline: true,
       onQuery: (details) => options.onQuery?.({ ...details, date }) });
     catalogs.push({ ...catalog, times: [...new Set([...discoveries[index].times, ...configuredTimes])],
@@ -174,7 +194,9 @@ export async function readReferenceCatalog({ dates, cached, ...options }) {
 }
 
 export function referenceDates(date = shanghaiDate()) {
-  const today = shanghaiDate(), tomorrow = addDays(today, 1);
-  const released = (d) => releaseEpoch(addDays(d, -1), '12:30:00') <= Date.now();
-  return [...new Set([released(date) ? date : today, today, ...(released(tomorrow) ? [tomorrow] : [])])];
+  const today = shanghaiDate();
+  // Booking release controls mutations, not which date may supply reference
+  // structure. A weekday package list can omit courts offered on the weekend.
+  // Try the selected date first, even before release, then merge nearby dates.
+  return [...new Set([date, today, addDays(today, 1)])];
 }

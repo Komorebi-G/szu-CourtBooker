@@ -10,8 +10,8 @@ function catalogKey(accountId, target) {
   return createHash('sha256').update(scope).digest('hex');
 }
 
-// Only reference structure is cached. It can identify a fixed court at release,
-// but never establishes a vacancy for salvage or subsequent retries.
+// Cache structure and dated editor hints. Neither establishes a vacancy for
+// booking: the runner must read its target date and slot before submitting.
 export class ReferenceCatalogStore {
   constructor(dataDir) { this.dir = join(dataDir, 'catalogs'); this.pending = new Map(); this.writes = new Map(); }
   async loadCached(key) {
@@ -48,7 +48,7 @@ export class ReferenceCatalogStore {
             const merged = mergeReferenceCatalogs([catalog], { target, cached: latest });
             catalog = { ...merged, dates: catalog.dates, cached: catalog.cached || merged.cached };
             await mkdir(this.dir, { recursive: true, mode: 0o700 });
-            await writeJson(path, { date: catalog.date, times: catalog.times,
+            await writeJson(path, { date: catalog.date, times: catalog.times, history: catalog.history,
               courts: catalog.courts.map(({ id, name, venue, venueCode }) => ({ id, name, venue, venueCode })),
               rooms: catalog.rooms.map((room) => Object.fromEntries(['WID', 'CDMC', 'CGBM', 'CQBM', 'XMDM', 'XQDM']
                 .filter((field) => room[field] !== undefined).map((field) => [field, room[field]]))) });

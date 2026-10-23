@@ -146,3 +146,66 @@ export function installMenus(doc = document) {
     if (rect.right > doc.defaultView.innerWidth - 12) menu.classList.add('align-end');
   }, true);
 }
+// Reference hints describe dated reads, never a booking guarantee. Missing rows
+// and failed queries remain distinct, and history is matched by exact date.
+export function referenceCourtStatus(catalog, court, date, times = []) {
+  if (court.pendingName) return { state: 'unknown', historical: false, label: '等待目标日期查询确认',
+    hint: '查到同名场地后才尝试', detail: '按学校完整名称匹配，查到同名场地后才尝试' };
+  const slots = times.length ? times : catalog?.times ?? [];
+  const current = catalog?.views ?? [], history = catalog?.history ?? [];
+  const contains = view => view.available.includes(court.id) || view.unavailable.includes(court.id);
+  const venue = court.venueCode ?? catalog?.rooms?.find(room => room.WID === court.id)?.CGBM
+    ?? [...current, ...history].find(contains)?.venueCode;
+  const historical = !current.some(contains);
+  const stamp = view => new Date(view.checkedAt + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ');
+  const inspect = views => {
+    const rows = slots.map(time => views.filter(view => view.date === date && view.time === time && view.venueCode === venue)
+      .sort((a, b) => b.checkedAt - a.checkedAt)[0]);
+    const known = rows.filter(Boolean);
+    if (!known.length) return null;
+    const available = known.filter(view => view.available.includes(court.id));
+    const unavailable = known.filter(view => view.unavailable.includes(court.id));
+    const missing = known.filter(view => !contains(view));
+    const complete = rows.length === known.length;
+    const state = available.length === slots.length ? 'available' : available.length ? 'partial'
+      : !complete ? 'unknown' : unavailable.length ? 'unavailable' : 'missing';
+    const label = { available: '查询有可用时段', partial: '部分时段可用', unknown: '当天尚未查明',
+      unavailable: '查询不可用', missing: '当天未返回' }[state];
+    const details = [available.length && `可用 ${available.map(view => view.time).join('、')}`,
+      unavailable.length && `不可用 ${unavailable.map(view => view.time).join('、')}`,
+      missing.length && `未返回 ${missing.map(view => view.time).join('、')}`,
+      !complete && '其余时段未查明'].filter(Boolean).join('；');
+    return { state, label, hint: ['partial', 'unknown'].includes(state) ? details : '',
+      detail: `${stamp(known.sort((a, b) => b.checkedAt - a.checkedAt)[0])} 查询；${details}` };
+  };
+  const live = inspect(current);
+  const previous = [...history].filter(contains).sort((a, b) => b.checkedAt - a.checkedAt)[0];
+  const source = previous ? `${stamp(previous)}：${previous.date} ${previous.available.includes(court.id) ? '曾有可用时段' : '曾返回不可用'}` : '';
+  const sourceHint = previous ? `${previous.date} ${previous.available.includes(court.id) ? '曾有可用时段' : '曾返回不可用'}` : '';
+  if (live) return { ...live, historical, hint: historical && sourceHint ? `历史 ${sourceHint}` : live.hint,
+    detail: live.detail + (historical && source ? `；历史 ${source}` : '') };
+  const old = inspect(history);
+  if (old) return { ...old, state: 'history', label: `历史当日${old.label.replace('当天', '')}`, historical: true,
+    hint: `${date} 历史记录，当前待查询`, detail: `${old.detail}；当前待查询` };
+  if (previous) return { state: historical ? 'history' : 'unknown', historical,
+    label: historical ? '仅历史目录' : '所选日期尚未查明', hint: `${historical ? '历史' : '参考'} ${sourceHint}`,
+    detail: `${historical ? '历史' : '参考'} ${source}` };
+  return { state: historical ? 'history' : 'unknown', historical,
+    label: historical ? '仅历史目录' : '所选日期尚未查明', detail: '暂无当天可用记录，仍可选择' };
+}
+
+export function referenceCatalogHint(catalog, date, times = []) {
+  if (!catalog?.courts?.length) return '';
+  const courts = catalog.courts.map(court => ({ court, status: referenceCourtStatus(catalog, court, date, times) }));
+  const pending = courts.filter(item => item.court.pendingName).length;
+  const parts = [`场地全集 ${courts.length} 个${pending ? `（含 ${pending} 个待确认名称）` : ''}；提示按 ${date}${times.length ? ' 所选时段' : ' 已查询时段'}`];
+  const checkedAt = Math.max(0, ...(catalog.views ?? []).map(view => view.checkedAt));
+  if (checkedAt) parts.push(`查询于 ${new Date(checkedAt + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')}`);
+  for (const [state, text] of [['unavailable', '查询不可用'], ['missing', '当天未返回'], ['history', '仅历史记录']]) {
+    const names = courts.filter(item => item.status.state === state).map(item => item.court.name);
+    if (names.length) parts.push(`${text}：${names.join('、')}`);
+  }
+  if (catalog.issues?.some(issue => issue.date === date)) parts.push('当天目录未查完整，未查到不等于不可用');
+  parts.push('以上场地均可选，实际空位以执行时学校返回为准');
+  return parts.join('。') + '。';
+}

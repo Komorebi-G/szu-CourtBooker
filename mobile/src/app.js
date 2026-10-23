@@ -1,4 +1,4 @@
-import { installMenus, planExperience, visiblePlans, repeatPlan, friendlyDate, selectionSummary, selectedBookingGoal, bookingTitle, matchingMobileRun } from '../../shared/experience.js';
+import { installMenus, planExperience, visiblePlans, repeatPlan, friendlyDate, selectionSummary, selectedBookingGoal, bookingTitle, matchingMobileRun, referenceCourtStatus, referenceCatalogHint } from '../../shared/experience.js';
 import { device, native, nativeTransport } from './device.js';
 import { saveSchoolLogin } from './login.js';
 import { MobileStore, pendingMobileRequests, reviewedMobileRuns } from './store.js';
@@ -173,6 +173,7 @@ function loadCached() {
   renderChoices();
 }
 function renderChoices() {
+  choices.courts = [...new Set(choices.courts.map(id => choices.catalog?.courts?.find(court => court.name === id)?.id ?? id))];
   if (!choices.customGoal && !choices.preserveGoal) $('#bookingGoal').value = selectedBookingGoal(choices.times);
   $('#bookingGoalHint').hidden = $('#bookingGoal').value !== 'consecutive';
   const date = $('#planDate').value;
@@ -193,9 +194,14 @@ function renderChoices() {
   const times = [...new Set([...(catalog?.times ?? []), ...choices.times])].sort();
   $('#times').innerHTML = times.map((time) => `<button type="button" class="time-option ${choices.times.includes(time) ? 'selected' : ''}" data-time="${escape(time)}" aria-pressed="${choices.times.includes(time)}">${escape(time)}</button>`).join('');
   const courts = [...(catalog?.courts ?? [])];
-  for (const id of choices.courts.filter((c) => c !== '*')) if (!courts.some((c) => c.id === id)) courts.push({ id, name: choices.labels[id] ?? '已保存场地' });
+  for (const id of choices.courts.filter((c) => c !== '*')) if (!courts.some((c) => c.id === id)) {
+    const name = choices.labels[id] ?? id;
+    courts.push({ id, name, pendingName: id === name });
+  }
   $('#courts').innerHTML = courts.map((court) => { const n = choices.courts.indexOf(court.id); choices.labels[court.id] = court.name;
-    return `<button type="button" class="court-card ${n >= 0 ? 'selected' : ''}" data-court="${escape(court.id)}" aria-pressed="${n >= 0}"><span class="court-order">${n >= 0 ? n + 1 : '+'}</span><span class="court-name">${escape(court.name)}</span></button>`; }).join('');
+    const status = referenceCourtStatus(catalog, court, date, choices.times);
+    return `<button type="button" class="court-card ${n >= 0 ? 'selected' : ''}" data-court="${escape(court.id)}" aria-pressed="${n >= 0}"><span class="court-order">${n >= 0 ? n + 1 : '+'}</span><span class="court-name">${escape(court.name)}<span class="court-availability ${status.state}">${escape(status.label)}</span>${status.hint !== '' ? `<span class="court-venue" title="${escape(status.detail)}">${escape(status.hint ?? status.detail)}</span>` : ''}</span></button>`; }).join('');
+  $('#courtNote').textContent = referenceCatalogHint(catalog ? { ...catalog, courts } : null, date, choices.times);
   $('#sequence').innerHTML = choices.courts.includes('*') ? '按学校顺序尝试全部场地' : choices.courts.map((id, i) => `<span class="order-chip">${i + 1}. ${escape(choices.labels[id] ?? id)}<button type="button" data-move="${i}" data-step="-1" aria-label="上移 ${escape(choices.labels[id] ?? id)}" ${i === 0 ? 'disabled' : ''}>↑</button><button type="button" data-move="${i}" data-step="1" aria-label="下移 ${escape(choices.labels[id] ?? id)}" ${i === choices.courts.length - 1 ? 'disabled' : ''}>↓</button></span>`).join(' → ');
   $('#orderSettings').hidden = choices.courts.includes('*') || choices.courts.length < 2;
 }
@@ -371,6 +377,15 @@ $('#addTime').onclick = action(() => { const time = $('#timeStart').value + '-' 
 $('#courts').onclick = (event) => { const id = event.target.closest('[data-court]')?.dataset.court; if (!id) return;
   choices.courts = choices.courts.includes(id) ? choices.courts.filter((c) => c !== id) : [...choices.courts.filter((c) => c !== '*'), id]; renderChoices(); };
 $('#allCourts').onclick = () => { choices.courts = ['*']; renderChoices(); };
+$('#addCourtButton').onclick = () => {
+  const name = $('#manualCourtName').value.trim();
+  if (!name || name === '*') { $('#planError').textContent = '请填写学校显示的场地完整名称'; return; }
+  const court = choices.catalog?.courts?.find(court => court.name === name || court.id === name);
+  const id = court?.id ?? name;
+  choices.labels[id] = court?.name ?? name;
+  choices.courts = [...new Set([...choices.courts.filter(value => value !== '*'), id])];
+  $('#manualCourtName').value = ''; $('#planError').textContent = ''; renderChoices();
+};
 $('#planForm').onsubmit = action(async (event) => {
   event.preventDefault(); if (authBusy) return; editable();
   const continueToBooking = !editPlan && shanghaiDate(bookingReleaseAt($('#planDate').value)) <= shanghaiDate();

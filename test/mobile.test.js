@@ -707,6 +707,35 @@ test('停止发生在原生账号队列等待期间，不调用设备提交预�
   const rejected = assert.rejects(booking, /已停止/); release(); await reading; await rejected; assert.equal(sends, 1);
 });
 
+test('手机周五上午首次读取周末包场目录：发现明天独有场地，换回今天也保留参考结构', async t => {
+  const friday = '2026-10-23', saturday = '2026-10-24';
+  t.mock.timers.setTime(Date.parse(friday + 'T10:00:00+08:00'));
+  const reads = []; let saved;
+  const device = { async writeState({ value }) { saved = JSON.parse(value); }, async request({ url, body }) {
+    const form = Object.fromEntries(new URLSearchParams(body)); let data;
+    if (url.endsWith('index.do')) data = 'USERID=\'A\';USER_INFO={"userName":"同学甲"};APP_TITLE=';
+    else if (url.endsWith('getSportVenueData.do')) data = metadata;
+    else if (url.endsWith('getTimeList.do')) data = (form.YYRQ === saturday ? ['19:00-20:00', '20:00-21:00'] : ['19:00-20:00']).map(CODE => ({ CODE }));
+    else if (url.endsWith('getOpeningRoom.do')) {
+      reads.push(form); assert.equal(form.YYLX, '1.0');
+      const id = form.YYRQ === saturday && form.KSSJ === '20:00' ? 'WEEKEND' : 'WEEKDAY';
+      data = { code: '0', datas: { getOpeningRoom: { rows: [{ WID: id, CDMC: id, CGBM: 'v' }] } } };
+    } else assert.fail(`目录刷新不得调用其他接口：${url}`);
+    return { status: 200, headers: {}, body: typeof data === 'string' ? data : JSON.stringify(data) };
+  } };
+  const store = new MobileStore(device), account = { id: 'a', userId: 'A', session: { userAgent: 'weekend-test', cookies: [] } };
+  store.state.accounts = [account];
+  const catalog = await readCatalog(store, device, account, 'badminton', saturday);
+  assert.deepEqual(catalog.courts.map(c => c.id).sort(), ['WEEKDAY', 'WEEKEND']);
+  assert.deepEqual(catalog.times, ['19:00-20:00', '20:00-21:00']);
+  assert.equal(reads[0].YYRQ, saturday);
+  const todayCatalog = await readCatalog(store, device, account, 'badminton', friday);
+  assert.deepEqual(todayCatalog.courts.map(c => c.id).sort(), ['WEEKDAY', 'WEEKEND']);
+  assert.deepEqual(saved.catalogs['a:badminton'].rooms.map(r => r.WID).sort(), ['WEEKDAY', 'WEEKEND']);
+  assert.equal(saved.catalogs['a:badminton'].views, undefined, '历史快照不得作为新查询结果载入');
+  assert.equal(saved.catalogs['a:badminton'].history.length, 4);
+});
+
 test('手机较早目录刷新晚返回时，保留较晚刷新已保存的场地', async () => {
   let release, entered, blocked = false, saved;
   const started = new Promise((resolve) => entered = resolve);

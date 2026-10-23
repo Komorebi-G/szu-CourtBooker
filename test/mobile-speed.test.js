@@ -320,7 +320,7 @@ test('固定场地缓存不能绕过学校已用名额，已有一段只新增�
   assert.ok(f.calls.some(c => c.endpoint === 'getOpeningRoom.do'));
 });
 
-test('缓存固定场地在放号前准备两段：到点不查目录、不补写意图，正式请求仍串行', async t => {
+test('固定场地先查目标日期再准备两段：到点不补查、不补写意图，正式请求仍串行', async t => {
   const releaseAt = Date.parse('2026-10-14T12:30:00+08:00'); let prepared;
   const f = fixture(t, { onWrite: state => {
     const intents = Object.values(state.runs[0]?.pendingRequests ?? {});
@@ -331,16 +331,32 @@ test('缓存固定场地在放号前准备两段：到点不查目录、不补�
   cacheCourt(f); t.mock.timers.setTime(releaseAt - 10000);
   const run = await f.runner.start([f.plan], 'release');
   assert.equal(run.status, 'success'); assert.equal(f.maxActive(), 1);
-  assert.equal(f.calls.filter(c => c.endpoint === 'getOpeningRoom.do').length, 0);
+  const queries = f.calls.filter(c => c.endpoint === 'getOpeningRoom.do');
+  assert.equal(queries.length, 2); assert.ok(queries.every(c => c.at < releaseAt));
   assert.deepEqual(f.books.map(c => c.requestId).sort(), prepared.sort());
 });
 
-for (const includeOtherCourts of [false, true]) test(`倒计时多场地按配置顺序直提，缓存反序和旧满员不影响首选；允许其余=${includeOtherCourts}`, async t => {
+for (const unavailable of [false, true]) test(`手机倒计时：历史有场地，目标时段${unavailable ? '明确不可用' : '不存在'}时零预约请求`, async t => {
+  const releaseAt = Date.parse('2026-10-14T12:30:00+08:00'); let queries = 0;
+  const f = fixture(t, { onRooms: call => {
+    assert.equal(call.form.YYRQ, '2026-10-15'); assert.equal(call.form.KSSJ, '12:00');
+    if (++queries === 1) t.mock.timers.setTime(releaseAt + 1);
+    if (queries >= 3) t.mock.timers.setTime(releaseAt + 1001);
+    return unavailable ? [{ ...knownCourt, disabled: true }] : [{ ...knownCourt, WID: 'other', CDMC: 'other' }];
+  } });
+  cacheCourt(f); t.mock.timers.setTime(releaseAt - 10000);
+  const run = await f.runner.start([{ ...f.plan, times: ['12:00-13:00'], bookingGoal: 'one' }], 'release');
+  assert.ok(queries >= 2); assert.equal(f.books.length, 0); assert.equal(run.successes.length, 0);
+  assert.deepEqual(pendingMobileRequests(run), []);
+});
+
+for (const includeOtherCourts of [false, true]) test(`倒计时多场地先核对目标时段，缓存反序和旧满员不影响首选；允许其余=${includeOtherCourts}`, async t => {
   const f = countdownFixture(t);
   cacheCourt(f, ['C4', 'C6'].map(id => ({ ...knownCourt, WID: id, CDMC: id, disabled: true, text: '旧日期已满' })));
   const run = await f.runner.start([{ ...f.plan, courts: ['C6', 'C4'], includeOtherCourts, durationMs: 10000 }], 'release');
   assert.equal(run.status, 'success'); assert.equal(f.maxActive(), 1);
-  assert.equal(f.calls.filter(c => c.endpoint === 'getOpeningRoom.do').length, 0);
+  const queries = f.calls.filter(c => c.endpoint === 'getOpeningRoom.do');
+  assert.equal(queries.length, 2); assert.ok(queries.every(c => c.at < f.releaseAt));
   assert.deepEqual(f.books.map(c => [c.form.KYYSJD, c.form.CDWID]), [['12:00-13:00', 'C6'], ['13:00-14:00', 'C6']]);
   assert.ok(f.books.every(c => c.at >= f.releaseAt && c.deadlineMs === run.items[0].releaseAt + 2000));
   assert.ok(f.books[1].startedAt >= f.books[0].endedAt);
@@ -357,10 +373,10 @@ test('缓存首选已满后先查空位再换场，同场后段动态改为成�
   assert.deepEqual(f.books.map(c => [c.form.KYYSJD, c.form.CDWID]), [
     ['12:00-13:00', 'C6'], ['12:00-13:00', 'C4'], ['13:00-14:00', 'C4'],
   ]);
-  const relevant = f.calls.filter(c => ['getOpeningRoom.do', 'insertVenueBookingInfo.do'].includes(c.endpoint));
+  const relevant = f.calls.filter(c => c.at >= f.releaseAt && ['getOpeningRoom.do', 'insertVenueBookingInfo.do'].includes(c.endpoint));
   assert.deepEqual(relevant.map(c => c.endpoint), [
     'insertVenueBookingInfo.do', 'getOpeningRoom.do', 'insertVenueBookingInfo.do', 'insertVenueBookingInfo.do',
-  ], '缓存只直提一次；实时目录仍列出 C6 时也不立即重复已经失败的请求');
+  ], '已核对的首选只直提一次；重新查询仍列出 C6 时也不立即重复已经失败的请求');
   assert.equal(relevant[1].form.KSSJ, '12:00', '只重查失败时段，后段仍可用缓存选择同场');
   const original = f.prepared().find(r => r.time === '13:00-14:00'), second = f.books.at(-1);
   assert.equal(original.courtId, 'C6'); assert.notEqual(second.requestId, original.requestId);
@@ -388,15 +404,16 @@ for (const invalid of ['incomplete', 'ambiguous']) test(`倒计时多场地缓�
 test('允许其他场地的首段回退到未缓存场地后，后段先查目录保持同场偏好', async t => {
   const f = countdownFixture(t, { onBook: async call => call.form.CDWID === 'C2'
     ? { code: '0' } : { code: '1', msg: '已满' },
-  onRooms: () => ['C6', 'C4', 'C2'].map(id => ({ ...knownCourt, WID: id, CDMC: id })) });
+  onRooms: call => (call.at < f.releaseAt && call.form.KSSJ === '13:00' ? ['C6', 'C4'] : ['C6', 'C4', 'C2'])
+    .map(id => ({ ...knownCourt, WID: id, CDMC: id })) });
   cacheCourt(f, ['C6', 'C4'].map(id => ({ ...knownCourt, WID: id, CDMC: id })));
   const run = await f.runner.start([{ ...f.plan, courts: ['C6', 'C4'], includeOtherCourts: true, preferSameCourt: true }], 'release');
   assert.equal(run.status, 'success'); assert.equal(f.maxActive(), 1);
   assert.deepEqual(f.books.map(c => [c.form.KYYSJD, c.form.CDWID]), [
     ['12:00-13:00', 'C6'], ['12:00-13:00', 'C4'], ['12:00-13:00', 'C2'], ['13:00-14:00', 'C2'],
   ]);
-  assert.deepEqual(f.calls.filter(c => c.endpoint === 'getOpeningRoom.do').map(c => c.form.KSSJ), ['12:00', '13:00']);
-  const secondQuery = f.calls.find(c => c.endpoint === 'getOpeningRoom.do' && c.form.KSSJ === '13:00');
+  assert.deepEqual(f.calls.filter(c => c.at >= f.releaseAt && c.endpoint === 'getOpeningRoom.do').map(c => c.form.KSSJ), ['12:00', '13:00']);
+  const secondQuery = f.calls.find(c => c.at >= f.releaseAt && c.endpoint === 'getOpeningRoom.do' && c.form.KSSJ === '13:00');
   assert.ok(f.calls.indexOf(secondQuery) > f.calls.indexOf(f.books[2]));
   assert.ok(f.calls.indexOf(secondQuery) < f.calls.indexOf(f.books[3]), '未缓存的同场优先于原配置第一项');
   assert.deepEqual(pendingMobileRequests(run), []);
@@ -411,7 +428,7 @@ test('倒计时多场地缓存遇到过频先退避再查询，保留原首选�
   assert.deepEqual(f.books.map(c => [c.form.KYYSJD, c.form.CDWID]), [
     ['12:00-13:00', 'C6'], ['12:00-13:00', 'C6'], ['13:00-14:00', 'C6'],
   ]);
-  const queries = f.calls.filter(c => c.endpoint === 'getOpeningRoom.do');
+  const queries = f.calls.filter(c => c.at >= f.releaseAt && c.endpoint === 'getOpeningRoom.do');
   assert.equal(queries.length, 1);
   assert.ok(queries[0].startedAt - f.books[0].endedAt >= 10, '实时刷新也不能抢在账号冷却结束前发送');
   assert.deepEqual(pendingMobileRequests(run), []);
@@ -422,7 +439,7 @@ test('倒计时多场地缓存首单响应未知时保留唯一待核对请求�
   cacheCourt(f, ['C6', 'C4'].map(id => ({ ...knownCourt, WID: id, CDMC: id })));
   const run = await f.runner.start([{ ...f.plan, courts: ['C6', 'C4'] }], 'release');
   assert.equal(run.status, 'error'); assert.equal(f.books.length, 1); assert.equal(f.books[0].form.CDWID, 'C6');
-  assert.equal(f.calls.filter(c => c.endpoint === 'getOpeningRoom.do').length, 0);
+  assert.equal(f.calls.filter(c => c.at >= f.releaseAt && c.endpoint === 'getOpeningRoom.do').length, 0);
   assert.equal(run.items[0].metrics.unknown, 1);
   assert.equal(pendingMobileRequests(run).length, 1);
   assert.equal(pendingMobileRequests(run)[0].courtId, 'C6');
@@ -438,13 +455,14 @@ for (const vacancy of [true, false]) test(`固定缓存首段响应跨过快速�
     if (n === 1) t.mock.timers.setTime(releaseAt + 2500);
     return { code: '0' };
   }, onRooms: call => {
+    if (Date.now() < releaseAt) return [knownCourt];
     assert.equal(call.form.KSSJ, '13:00', '首段在途成功保留，只重读第二段');
     if (!vacancy) f.runner.stop();
     return [{ ...knownCourt, disabled: !vacancy }];
   } });
   cacheCourt(f); t.mock.timers.setTime(releaseAt - 10000);
   const run = await f.runner.start([{ ...f.plan, durationMs: 10000 }], 'release');
-  assert.equal(f.calls.filter(call => call.endpoint === 'getOpeningRoom.do').length, 1);
+  assert.equal(f.calls.filter(call => call.at >= releaseAt && call.endpoint === 'getOpeningRoom.do').length, 1);
   assert.equal(f.books.length, vacancy ? 2 : 1); assert.equal(run.successes.length, vacancy ? 2 : 1);
   assert.equal(f.books[0].deadlineMs, run.items[0].releaseAt + 2000, '校时后的快速窗口截止传递到原生实际派发');
   if (vacancy) assert.equal(f.books[1].deadlineMs, run.items[0].deadline, '查询过的空位使用正常执行窗口');
@@ -471,7 +489,7 @@ test('固定缓存在原生队列中跨过快速窗口：明确未发送，回�
   const run = await f.runner.start([{ ...f.plan, times: [f.plan.times[0]], bookingGoal: 'one', durationMs: 10000 }], 'release');
   assert.equal(run.status, 'success', JSON.stringify(run)); assert.equal(f.books.length, 1);
   assert.equal(deferredId, preparedId); assert.notEqual(f.books[0].requestId, deferredId);
-  assert.equal(f.calls.filter(call => call.endpoint === 'getOpeningRoom.do').length, 1);
+  assert.equal(f.calls.filter(call => call.at >= releaseAt && call.endpoint === 'getOpeningRoom.do').length, 1);
   assert.equal(run.items[0].metrics.unknown, 0); assert.deepEqual(pendingMobileRequests(run), []);
   assert.equal(Object.keys(f.snapshots.at(-1).runs[0].pendingRequests).length, 0);
 });
@@ -489,7 +507,7 @@ test('快速窗口内已发送但跨窗口后响应丢失：保留未知订单�
   const run = await f.runner.start([{ ...f.plan, times: [f.plan.times[0]], bookingGoal: 'one', durationMs: 10000 }], 'release');
   assert.equal(f.books.length, 1); assert.equal(run.items[0].metrics.unknown, 1);
   assert.equal(pendingMobileRequests(run).length, 1); assert.equal(run.status, 'error');
-  assert.equal(f.calls.filter(call => call.endpoint === 'getOpeningRoom.do').length, 0, '未知提交不进入空位重试');
+  assert.equal(f.calls.filter(call => call.at >= releaseAt && call.endpoint === 'getOpeningRoom.do').length, 0, '未知提交不进入空位重试');
 });
 
 for (const firstCourtFull of [false, true]) test(`多场地同场偏好：两段意图提前准备，首选已满=${firstCourtFull} 时仍绑定正确场地`, async t => {
